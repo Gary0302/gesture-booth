@@ -19,11 +19,12 @@ let isCapturing = false;
 let currentSlot = 1;
 let photos = [];
 
+// 四格原本的濾鏡
 const filters = [
-  "brightness(110%) contrast(95%) saturate(90%)",
-  "sepia(45%) brightness(105%) contrast(105%)",
-  "contrast(125%) saturate(130%)",
-  "grayscale(100%) contrast(120%)"
+  "brightness(112%) contrast(92%) saturate(88%)",       // 第 1 格：日系清透
+  "sepia(45%) brightness(105%) contrast(105%)",         // 第 2 格：復古
+  "contrast(125%) saturate(130%) brightness(105%)",     // 第 3 格：高對比
+  "brightness(110%) contrast(100%) saturate(120%)"      // 第 4 格：凸透鏡前的基礎濾鏡
 ];
 
 startBtn.addEventListener("click", async () => {
@@ -40,8 +41,10 @@ startBtn.addEventListener("click", async () => {
 resetBtn.addEventListener("click", () => {
   currentSlot = 1;
   photos = [];
+  isCapturing = false;
   clearResultCanvas();
   statusText.textContent = "已重新開始，請比 1 拍第 1 格";
+  gestureText.textContent = "目前手勢：尚未偵測";
 });
 
 downloadBtn.addEventListener("click", () => {
@@ -122,16 +125,16 @@ function detectLoop() {
 function countFingers(landmarks) {
   let count = 0;
 
-  // 食指
+  // 食指：指尖 8，關節 6
   if (landmarks[8].y < landmarks[6].y) count++;
 
-  // 中指
+  // 中指：指尖 12，關節 10
   if (landmarks[12].y < landmarks[10].y) count++;
 
-  // 無名指
+  // 無名指：指尖 16，關節 14
   if (landmarks[16].y < landmarks[14].y) count++;
 
-  // 小指
+  // 小指：指尖 20，關節 18
   if (landmarks[20].y < landmarks[18].y) count++;
 
   return count;
@@ -175,15 +178,68 @@ function capturePhoto(slot) {
 
   ctx.save();
 
+  // 讓拍出來的照片不要左右相反
   ctx.translate(canvas.width, 0);
   ctx.scale(-1, 1);
 
+  // 套用每一格不同的基礎濾鏡
   ctx.filter = filters[slot - 1];
 
   ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
   ctx.restore();
 
+  // 第 4 格加上凸透鏡效果
+  if (slot === 4) {
+    applyConvexEffect(canvas);
+  }
+
   return canvas;
+}
+
+function applyConvexEffect(canvas) {
+  const ctx = canvas.getContext("2d");
+
+  const width = canvas.width;
+  const height = canvas.height;
+
+  const imageData = ctx.getImageData(0, 0, width, height);
+  const src = imageData.data;
+
+  const output = ctx.createImageData(width, height);
+  const dst = output.data;
+
+  const cx = width / 2;
+  const cy = height / 2;
+  const r = Math.min(width, height) / 3;
+
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const dx = x - cx;
+      const dy = y - cy;
+      const d = Math.sqrt(dx * dx + dy * dy);
+
+      let sx = x;
+      let sy = y;
+
+      if (d <= r) {
+        sx = Math.floor((dx * d) / r + cx);
+        sy = Math.floor((dy * d) / r + cy);
+      }
+
+      sx = Math.max(0, Math.min(width - 1, sx));
+      sy = Math.max(0, Math.min(height - 1, sy));
+
+      const srcIndex = (sy * width + sx) * 4;
+      const dstIndex = (y * width + x) * 4;
+
+      dst[dstIndex] = src[srcIndex];
+      dst[dstIndex + 1] = src[srcIndex + 1];
+      dst[dstIndex + 2] = src[srcIndex + 2];
+      dst[dstIndex + 3] = src[srcIndex + 3];
+    }
+  }
+
+  ctx.putImageData(output, 0, 0);
 }
 
 function drawFourGrid() {
@@ -207,8 +263,8 @@ function drawFourGrid() {
 
     resultCtx.drawImage(photo, x, y, photoW, photoH);
 
-    resultCtx.fillStyle = "rgba(255,255,255,0.8)";
-    resultCtx.fillRect(x + 12, y + 12, 72, 34);
+    resultCtx.fillStyle = "rgba(255, 255, 255, 0.85)";
+    resultCtx.fillRect(x + 12, y + 12, 80, 34);
 
     resultCtx.fillStyle = "#111";
     resultCtx.font = "bold 20px Arial";
@@ -229,10 +285,22 @@ function drawFourGrid() {
 function clearResultCanvas() {
   resultCanvas.width = 762;
   resultCanvas.height = 1094;
-  resultCtx.fillStyle = "#fff";
+
+  resultCtx.fillStyle = "#ffffff";
   resultCtx.fillRect(0, 0, resultCanvas.width, resultCanvas.height);
+
+  resultCtx.fillStyle = "#999";
+  resultCtx.font = "24px Arial";
+  resultCtx.textAlign = "center";
+  resultCtx.fillText(
+    "四格照片會顯示在這裡",
+    resultCanvas.width / 2,
+    resultCanvas.height / 2
+  );
 }
 
 function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
+
+clearResultCanvas();
