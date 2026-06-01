@@ -1,0 +1,41 @@
+index_html = r'''
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AI 手勢四格拍貼機</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <main class="app">
+    <h1>AI 手勢四格拍貼機</h1>
+    <p class="subtitle">比 1 拍第 1 格，比 2 拍第 2 格，比 3 拍第 3 格，比 4 拍第 4 格</p>
+
+    <section class="camera-card">
+      <video id="video" autoplay playsinline muted></video>
+      <div id="countdown" class="countdown"></div>
+    </section>
+
+    <p id="status">請按下「開啟相機」</p>
+    <p id="gestureText">目前手勢：尚未偵測</p>
+
+    <div class="buttons">
+      <button id="startBtn">開啟相機</button>
+      <button id="resetBtn">重新拍攝</button>
+      <button id="downloadBtn">下載四格照</button>
+    </div>
+
+    <h2>四格照片</h2>
+    <canvas id="resultCanvas"></canvas>
+  </main>
+
+  <script type="module" src="script.js"></script>
+</body>
+</html>
+'''
+
+with open("gesture-booth/index.html", "w", encoding="utf-8") as f:
+    f.write(index_html)
+
+print("index.html 建立完成")
