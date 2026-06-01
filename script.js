@@ -25,21 +25,12 @@ let isCapturing = false;
 let currentSlot = 1;
 let photos = [];
 
-// 四格原本的濾鏡
 const filters = [
-  // 第 1 格：日系清透，偏亮、低對比、低飽和
-  "brightness(125%) contrast(80%) saturate(70%)",
-
-  // 第 2 格：復古底片，偏黃棕
-  "sepia(80%) brightness(110%) contrast(120%) saturate(80%)",
-
-  // 第 3 格：高對比鮮豔
-  "contrast(160%) saturate(180%) brightness(105%)",
-
-  // 第 4 格：黑白強對比
-  "grayscale(100%) contrast(150%) brightness(105%)"
+  "japaneseSoft",  // 第 1 格：日系清透
+  "vintage",       // 第 2 格：復古底片
+  "vivid",         // 第 3 格：高對比鮮豔
+  "blackWhite"     // 第 4 格：黑白強對比
 ];
-
 startBtn.addEventListener("click", async () => {
   try {
     await setupCamera();
