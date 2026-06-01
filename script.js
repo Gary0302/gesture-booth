@@ -49,15 +49,29 @@ const filters = [
   "blackWhite"
 ];
 
+const MODEL_PATH = new URL("./models/hand_landmarker.task", import.meta.url).href;
+const WASM_PATH = new URL("./wasm", import.meta.url).href;
+const LOAD_TIMEOUT_MS = 60000;
+
+function withTimeout(promise, ms, message) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => {
+      setTimeout(() => reject(new Error(message)), ms);
+    })
+  ]);
+}
+
 startBtn.addEventListener("click", async () => {
   startBtn.disabled = true;
   try {
-    await setupCamera();
-    await setupHandLandmarker();
+    await Promise.all([setupCamera(), setupHandLandmarker()]);
+    gestureText.textContent = "目前手勢：搜尋手部中...";
     detectLoop();
   } catch (error) {
     console.error(error);
-    statusText.textContent = "相機或手勢辨識啟動失敗，請確認權限與網路";
+    statusText.textContent = `啟動失敗：${error.message || "請確認權限與網路"}`;
+    gestureText.textContent = "目前手勢：尚未偵測";
     startBtn.disabled = false;
   }
 });
@@ -104,8 +118,17 @@ async function setupCamera() {
   });
 
   await video.play();
+  await waitForVideoDimensions();
   isCameraOn = true;
   statusText.textContent = "相機已開啟，載入手勢辨識中...";
+}
+
+async function waitForVideoDimensions() {
+  for (let i = 0; i < 100; i++) {
+    if (video.videoWidth > 0 && video.videoHeight > 0) return;
+    await wait(50);
+  }
+  throw new Error("無法取得相機畫面，請重新整理後再試");
 }
 
 window.addEventListener("resize", () => {
@@ -115,13 +138,18 @@ window.addEventListener("resize", () => {
 async function setupHandLandmarker() {
   if (handLandmarker) return;
 
-  const vision = await FilesetResolver.forVisionTasks(
-    "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm"
+  statusText.textContent = "載入手勢辨識引擎（WASM）...";
+
+  const vision = await withTimeout(
+    FilesetResolver.forVisionTasks(WASM_PATH),
+    LOAD_TIMEOUT_MS,
+    "手勢引擎載入逾時，請檢查網路後重試"
   );
 
+  statusText.textContent = "載入 AI 模型中...";
+
   const baseOptions = {
-    modelAssetPath:
-      "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task"
+    modelAssetPath: MODEL_PATH
   };
 
   const landmarkerOptions = {
@@ -133,16 +161,24 @@ async function setupHandLandmarker() {
   };
 
   try {
-    handLandmarker = await HandLandmarker.createFromOptions(vision, {
-      baseOptions: { ...baseOptions, delegate: "CPU" },
-      ...landmarkerOptions
-    });
+    handLandmarker = await withTimeout(
+      HandLandmarker.createFromOptions(vision, {
+        baseOptions: { ...baseOptions, delegate: "CPU" },
+        ...landmarkerOptions
+      }),
+      LOAD_TIMEOUT_MS,
+      "AI 模型載入逾時，請檢查網路後重試"
+    );
   } catch (cpuError) {
     console.warn("CPU delegate 失敗，改用 GPU", cpuError);
-    handLandmarker = await HandLandmarker.createFromOptions(vision, {
-      baseOptions: { ...baseOptions, delegate: "GPU" },
-      ...landmarkerOptions
-    });
+    handLandmarker = await withTimeout(
+      HandLandmarker.createFromOptions(vision, {
+        baseOptions: { ...baseOptions, delegate: "GPU" },
+        ...landmarkerOptions
+      }),
+      LOAD_TIMEOUT_MS,
+      "AI 模型載入逾時，請檢查網路後重試"
+    );
   }
 
   statusText.textContent = "手勢辨識已就緒，請比 1 拍第 1 格（手掌面向鏡頭）";
