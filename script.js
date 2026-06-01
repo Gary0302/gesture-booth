@@ -9,19 +9,15 @@ const overlayCtx = overlayCanvas.getContext("2d");
 const startBtn = document.getElementById("startBtn");
 const resetBtn = document.getElementById("resetBtn");
 const downloadBtn = document.getElementById("downloadBtn");
-const statusText = document.getElementById("status");
 const gestureText = document.getElementById("gestureText");
 const loadProgress = document.getElementById("loadProgress");
 const countdownText = document.getElementById("countdown");
-const resultCanvas = document.getElementById("resultCanvas");
-const resultCtx = resultCanvas.getContext("2d");
 
 let handLandmarker;
 let cameraStream = null;
 let isCameraOn = false;
 let isCapturing = false;
-let currentSlot = 1;
-let photos = [];
+let photos = [null, null, null, null];
 let detectTimestamp = 0;
 let stableFrames = 0;
 
@@ -44,12 +40,7 @@ const HAND_CONNECTIONS = [
   [5, 9], [9, 13], [13, 17]
 ];
 
-const filters = [
-  "japaneseSoft",
-  "vintage",
-  "vivid",
-  "blackWhite"
-];
+const filters = ["japaneseSoft", "vintage", "vivid", "blackWhite"];
 
 const MODEL_PATH = new URL("./models/hand_landmarker.task", import.meta.url).href;
 const WASM_PATH = new URL("./wasm", import.meta.url).href;
@@ -57,6 +48,15 @@ const LOAD_TIMEOUT_MS = 90000;
 
 let landmarkerLoadPromise = null;
 let openCvLoadPromise = null;
+
+// ── Status badge ──────────────────────────────────────────────────────────────
+
+function setStatus(text, state = "default") {
+  const badge = document.getElementById("status");
+  const msg = document.getElementById("statusMsg");
+  msg.textContent = text;
+  badge.className = "status-badge" + (state !== "default" ? " " + state : "");
+}
 
 function setLoadProgress(text) {
   if (!text) {
@@ -68,21 +68,20 @@ function setLoadProgress(text) {
   loadProgress.textContent = text;
 }
 
+// ── Utilities ─────────────────────────────────────────────────────────────────
+
 function withTimeout(promise, ms, message) {
   return Promise.race([
     promise,
-    new Promise((_, reject) => {
-      setTimeout(() => reject(new Error(message)), ms);
-    })
+    new Promise((_, reject) => setTimeout(() => reject(new Error(message)), ms))
   ]);
 }
 
-function preloadHandLandmarker() {
-  if (!landmarkerLoadPromise) {
-    landmarkerLoadPromise = setupHandLandmarker({ silent: true });
-  }
-  return landmarkerLoadPromise;
+function wait(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
+
+// ── Button handlers ───────────────────────────────────────────────────────────
 
 startBtn.addEventListener("click", async () => {
   startBtn.disabled = true;
@@ -93,11 +92,11 @@ startBtn.addEventListener("click", async () => {
     overlayCanvas.classList.add("active");
     gestureText.textContent = "目前手勢：搜尋手部中...";
     setLoadProgress("");
-    statusText.textContent = "手勢辨識已就緒，請比 1 拍第 1 格（手掌面向鏡頭）";
+    setStatus("手勢辨識已就緒，比 1～4 根手指拍對應格子", "ready");
     detectLoop();
   } catch (error) {
     console.error(error);
-    statusText.textContent = `啟動失敗：${error.message || "請確認權限與網路"}`;
+    setStatus(`啟動失敗：${error.message || "請確認權限與網路"}`, "error");
     gestureText.textContent = "目前手勢：尚未偵測";
     setLoadProgress("");
     startBtn.disabled = false;
@@ -105,32 +104,76 @@ startBtn.addEventListener("click", async () => {
 });
 
 resetBtn.addEventListener("click", () => {
-  currentSlot = 1;
-  photos = [];
+  photos = [null, null, null, null];
   isCapturing = false;
   stableFrames = 0;
-  clearResultCanvas();
   clearHandOverlay();
-  statusText.textContent = "已重新開始，請比 1 拍第 1 格";
+  downloadBtn.disabled = true;
+  document.querySelectorAll(".result-box").forEach((box, i) => {
+    box.innerHTML = `<span class="num-tag">${i + 1}</span><span>待拍攝</span>`;
+  });
+  setStatus("已重新開始，比手勢拍攝對應格子", "active");
   gestureText.textContent = "目前手勢：尚未偵測";
 });
 
-downloadBtn.addEventListener("click", () => {
-  if (photos.length < 4) {
-    alert("請先完成四格拍照！");
-    return;
-  }
-
-  const link = document.createElement("a");
-  link.download = "gesture-four-cut.png";
-  link.href = resultCanvas.toDataURL("image/png");
-  link.click();
+// Delete a single slot via event delegation on the grid
+document.getElementById("photoStrip").addEventListener("click", (e) => {
+  const btn = e.target.closest(".delete-btn");
+  if (!btn) return;
+  const box = btn.closest(".result-box");
+  const slot = parseInt(box.dataset.index);
+  photos[slot - 1] = null;
+  box.innerHTML = `<span class="num-tag">${slot}</span><span>待拍攝</span>`;
+  downloadBtn.disabled = true;
+  setStatus(`第 ${slot} 格已刪除，比 ${slot} 根手指重新拍攝`, "active");
 });
+
+downloadBtn.addEventListener("click", () => {
+  if (photos.some(p => p === null)) return;
+
+  const photoW = 640, photoH = 480, gap = 18, padding = 24;
+  const canvas = document.createElement("canvas");
+  canvas.width = photoW * 2 + gap + padding * 2;
+  canvas.height = photoH * 2 + gap + padding * 2 + 70;
+  const ctx = canvas.getContext("2d");
+
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  Promise.all(photos.map((src, i) => new Promise(resolve => {
+    const img = new Image();
+    img.onload = () => {
+      const col = i % 2, row = Math.floor(i / 2);
+      const x = padding + col * (photoW + gap);
+      const y = padding + row * (photoH + gap);
+      ctx.drawImage(img, x, y, photoW, photoH);
+      ctx.fillStyle = "rgba(255, 255, 255, 0.85)";
+      ctx.fillRect(x + 12, y + 12, 80, 34);
+      ctx.fillStyle = "#111";
+      ctx.font = "bold 20px Arial";
+      ctx.textAlign = "left";
+      ctx.fillText(`No.${i + 1}`, x + 24, y + 36);
+      resolve();
+    };
+    img.src = src;
+  }))).then(() => {
+    ctx.fillStyle = "#111";
+    ctx.font = "bold 28px Arial";
+    ctx.textAlign = "center";
+    ctx.fillText("AI Gesture Booth", canvas.width / 2, canvas.height - 30);
+    const link = document.createElement("a");
+    link.download = "gesture-four-cut.png";
+    link.href = canvas.toDataURL("image/png");
+    link.click();
+  });
+});
+
+// ── Camera setup ──────────────────────────────────────────────────────────────
 
 async function setupCamera() {
   if (isCameraOn) return;
 
-  statusText.textContent = "正在開啟相機...";
+  setStatus("正在開啟相機...", "loading");
 
   cameraStream = await navigator.mediaDevices.getUserMedia({
     video: {
@@ -155,7 +198,7 @@ async function setupCamera() {
   await ensureVideoPlaying();
   await waitForVideoDimensions();
   isCameraOn = true;
-  statusText.textContent = "相機已開啟";
+  setStatus("相機已開啟", "loading");
 }
 
 async function ensureVideoPlaying() {
@@ -183,12 +226,19 @@ window.addEventListener("resize", () => {
   if (isCameraOn) ensureCanvasSize();
 });
 
+// ── Hand landmarker ───────────────────────────────────────────────────────────
+
+function preloadHandLandmarker() {
+  if (!landmarkerLoadPromise) {
+    landmarkerLoadPromise = setupHandLandmarker({ silent: true });
+  }
+  return landmarkerLoadPromise;
+}
+
 async function setupHandLandmarker({ silent = false } = {}) {
   if (handLandmarker) return;
 
-  if (!silent) {
-    statusText.textContent = "載入手勢辨識引擎（WASM）...";
-  }
+  if (!silent) setStatus("載入手勢辨識引擎（WASM）...", "loading");
   setLoadProgress("背景載入 WASM 引擎中...");
 
   const vision = await withTimeout(
@@ -199,10 +249,7 @@ async function setupHandLandmarker({ silent = false } = {}) {
 
   setLoadProgress("背景載入 AI 模型中（首次約 10–30 秒）...");
 
-  const baseOptions = {
-    modelAssetPath: MODEL_PATH
-  };
-
+  const baseOptions = { modelAssetPath: MODEL_PATH };
   const landmarkerOptions = {
     runningMode: "VIDEO",
     numHands: 1,
@@ -235,14 +282,14 @@ async function setupHandLandmarker({ silent = false } = {}) {
 
   setLoadProgress("");
   if (!silent && isCameraOn) {
-    statusText.textContent = "手勢辨識已就緒，請比 1 拍第 1 格（手掌面向鏡頭）";
+    setStatus("手勢辨識已就緒，比 1～4 根手指拍對應格子", "ready");
   }
 }
 
+// ── Detection loop ────────────────────────────────────────────────────────────
+
 function ensureCanvasSize() {
-  if (video.videoWidth === 0 || video.videoHeight === 0) {
-    return false;
-  }
+  if (video.videoWidth === 0 || video.videoHeight === 0) return false;
 
   if (detectCanvas.width !== video.videoWidth) {
     detectCanvas.width = video.videoWidth;
@@ -257,9 +304,7 @@ function ensureCanvasSize() {
 function detectLoop() {
   if (!handLandmarker || !isCameraOn) return;
 
-  if (video.paused) {
-    video.play().catch(() => {});
-  }
+  if (video.paused) video.play().catch(() => {});
 
   if (video.readyState < 2 || !ensureCanvasSize()) {
     requestAnimationFrame(detectLoop);
@@ -284,17 +329,23 @@ function detectLoop() {
 
     drawHandOverlay(landmarks, fingerCount);
 
-    if (fingerCount === currentSlot && !isCapturing && currentSlot <= 4) {
+    const slotAvailable = fingerCount >= 1 && fingerCount <= 4 && photos[fingerCount - 1] === null;
+
+    if (slotAvailable && !isCapturing) {
       stableFrames++;
       gestureText.textContent = `目前手勢：${fingerCount} 根手指（保持 ${stableFrames}/${STABLE_FRAMES_REQUIRED}）`;
 
       if (stableFrames >= STABLE_FRAMES_REQUIRED) {
         stableFrames = 0;
-        captureWithCountdown(currentSlot);
+        captureWithCountdown(fingerCount);
       }
     } else {
       stableFrames = 0;
-      gestureText.textContent = `目前手勢：${fingerCount} 根手指`;
+      if (fingerCount >= 1 && fingerCount <= 4 && photos[fingerCount - 1] !== null) {
+        gestureText.textContent = `目前手勢：${fingerCount} 根手指（第 ${fingerCount} 格已拍攝）`;
+      } else {
+        gestureText.textContent = `目前手勢：${fingerCount} 根手指`;
+      }
     }
   } else {
     stableFrames = 0;
@@ -304,6 +355,8 @@ function detectLoop() {
 
   requestAnimationFrame(detectLoop);
 }
+
+// ── Finger counting ───────────────────────────────────────────────────────────
 
 function landmarkDistance(a, b) {
   const dz = (a.z ?? 0) - (b.z ?? 0);
@@ -319,17 +372,19 @@ function countFingers(landmarks) {
     const pipDist = landmarkDistance(landmarks[pip], wrist);
     const mcpDist = landmarkDistance(landmarks[mcp], wrist);
 
-    if (tipDist > pipDist && tipDist > mcpDist * 0.95) {
-      count++;
-    }
+    if (tipDist > pipDist && tipDist > mcpDist * 0.95) count++;
   }
 
   return count;
 }
 
+// ── Overlay drawing ───────────────────────────────────────────────────────────
+
+// x is flipped here (not via CSS) so landmarks align with the mirrored video
+// and text drawn on the canvas stays readable (not backwards)
 function toCanvasPoint(landmark) {
   return {
-    x: landmark.x * overlayCanvas.width,
+    x: (1 - landmark.x) * overlayCanvas.width,
     y: landmark.y * overlayCanvas.height
   };
 }
@@ -389,113 +444,76 @@ function drawScanningIndicator() {
   overlayCtx.fillText("掃描中...", 44, overlayCanvas.height - 23);
 }
 
+// ── Capture ───────────────────────────────────────────────────────────────────
+
 async function captureWithCountdown(slot) {
   isCapturing = true;
-  statusText.textContent = `偵測到 ${slot}，準備拍第 ${slot} 格`;
 
-  for (let i = 3; i > 0; i--) {
-    countdownText.textContent = i;
-    await wait(700);
-  }
+  try {
+    setStatus(`偵測到 ${slot}，準備拍第 ${slot} 格`, "active");
 
-  countdownText.textContent = "拍！";
-  await wait(300);
+    for (let i = 3; i > 0; i--) {
+      countdownText.textContent = i;
+      await wait(700);
+    }
 
-  const photo = capturePhoto(slot);
-  photos.push(photo);
-  drawFourGrid();
+    countdownText.textContent = "拍！";
+    await wait(300);
 
-  countdownText.textContent = "";
+    // Capture the frame synchronously right now, then clear the countdown
+    // immediately — don't block on filter loading which can hang on slow networks
+    const canvas = captureFrame();
+    countdownText.textContent = "";
 
-  if (currentSlot < 4) {
-    currentSlot++;
-    statusText.textContent = `第 ${slot} 格完成，請比 ${currentSlot} 拍第 ${currentSlot} 格`;
-  } else {
-    statusText.textContent = "四格拍照完成，可以下載！";
+    // Show raw photo right away
+    const rawUrl = canvas.toDataURL("image/png");
+    const box = document.querySelector(`.result-box[data-index="${slot}"]`);
+    box.innerHTML = `<span class="num-tag">${slot}</span><img src="${rawUrl}" /><button class="delete-btn" title="刪除此格">×</button>`;
+    photos[slot - 1] = rawUrl;
+
+    const allDone = photos.every(p => p !== null);
+    if (allDone) {
+      setStatus("四格拍照完成，可以下載！", "ready");
+      downloadBtn.disabled = false;
+    } else {
+      const remaining = photos.map((p, i) => p === null ? i + 1 : null).filter(Boolean);
+      setStatus(`第 ${slot} 格完成，還需拍：第 ${remaining.join("、")} 格`, "active");
+    }
+
+    // Apply filter in background — updates preview and stored data when ready
+    applyOpenCvFilter(canvas, filters[slot - 1])
+      .then(() => {
+        const filteredUrl = canvas.toDataURL("image/png");
+        photos[slot - 1] = filteredUrl;
+        const img = box.querySelector("img");
+        if (img) img.src = filteredUrl;
+      })
+      .catch(console.warn);
+
+  } catch (error) {
+    console.error("拍照失敗:", error);
+    countdownText.textContent = "";
+    setStatus("拍照失敗，請重試", "error");
   }
 
   await wait(1200);
   isCapturing = false;
 }
 
-async function capturePhoto(slot) {
+function captureFrame() {
   const canvas = document.createElement("canvas");
   const ctx = canvas.getContext("2d");
-
   canvas.width = video.videoWidth;
   canvas.height = video.videoHeight;
-
   ctx.save();
   ctx.translate(canvas.width, 0);
   ctx.scale(-1, 1);
   ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
   ctx.restore();
-
-  await applyOpenCvFilter(canvas, filters[slot - 1]);
-
   return canvas;
 }
 
-function drawFourGrid() {
-  const photoW = 360;
-  const photoH = 480;
-  const gap = 18;
-  const padding = 24;
-
-  resultCanvas.width = photoW * 2 + gap + padding * 2;
-  resultCanvas.height = photoH * 2 + gap + padding * 2 + 70;
-
-  resultCtx.fillStyle = "#ffffff";
-  resultCtx.fillRect(0, 0, resultCanvas.width, resultCanvas.height);
-
-  photos.forEach((photo, index) => {
-    const col = index % 2;
-    const row = Math.floor(index / 2);
-
-    const x = padding + col * (photoW + gap);
-    const y = padding + row * (photoH + gap);
-
-    resultCtx.drawImage(photo, x, y, photoW, photoH);
-
-    resultCtx.fillStyle = "rgba(255, 255, 255, 0.85)";
-    resultCtx.fillRect(x + 12, y + 12, 80, 34);
-
-    resultCtx.fillStyle = "#111";
-    resultCtx.font = "bold 20px Arial";
-    resultCtx.textAlign = "left";
-    resultCtx.fillText(`No.${index + 1}`, x + 24, y + 36);
-  });
-
-  resultCtx.fillStyle = "#111";
-  resultCtx.font = "bold 28px Arial";
-  resultCtx.textAlign = "center";
-  resultCtx.fillText(
-    "AI Gesture Booth",
-    resultCanvas.width / 2,
-    resultCanvas.height - 30
-  );
-}
-
-function clearResultCanvas() {
-  resultCanvas.width = 762;
-  resultCanvas.height = 1094;
-
-  resultCtx.fillStyle = "#ffffff";
-  resultCtx.fillRect(0, 0, resultCanvas.width, resultCanvas.height);
-
-  resultCtx.fillStyle = "#999";
-  resultCtx.font = "24px Arial";
-  resultCtx.textAlign = "center";
-  resultCtx.fillText(
-    "四格照片會顯示在這裡",
-    resultCanvas.width / 2,
-    resultCanvas.height / 2
-  );
-}
-
-function wait(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
+// ── OpenCV filters ────────────────────────────────────────────────────────────
 
 function loadOpenCv() {
   if (openCvLoadPromise) return openCvLoadPromise;
@@ -510,9 +528,7 @@ function loadOpenCv() {
     const script = document.createElement("script");
     script.async = true;
     script.src = "https://docs.opencv.org/4.x/opencv.js";
-    script.onload = () => {
-      if (typeof onOpenCvReady === "function") onOpenCvReady();
-    };
+    script.onload = () => { if (typeof onOpenCvReady === "function") onOpenCvReady(); };
     script.onerror = () => reject(new Error("OpenCV 載入失敗"));
     document.body.appendChild(script);
   });
@@ -538,7 +554,7 @@ async function applyOpenCvFilter(canvas, filterName) {
   }
 
   let src = cv.imread(canvas);
-  let dst = new cv.Mat();
+  let dst;
 
   if (filterName === "japaneseSoft") {
     dst = applyJapaneseSoft(src);
@@ -553,20 +569,17 @@ async function applyOpenCvFilter(canvas, filterName) {
   }
 
   cv.imshow(canvas, dst);
-
   src.delete();
   dst.delete();
 }
 
 function applyJapaneseSoft(src) {
   let dst = new cv.Mat();
-
   src.convertTo(dst, -1, 0.85, 35);
 
   let blurred = new cv.Mat();
   cv.GaussianBlur(dst, blurred, new cv.Size(5, 5), 0);
   cv.addWeighted(dst, 0.75, blurred, 0.25, 0, dst);
-
   blurred.delete();
 
   return dst;
@@ -574,7 +587,6 @@ function applyJapaneseSoft(src) {
 
 function applyVintage(src) {
   let dst = src.clone();
-
   let channels = new cv.MatVector();
   cv.split(dst, channels);
 
@@ -588,61 +600,40 @@ function applyVintage(src) {
   b.convertTo(b, -1, 0.75, 0);
 
   let merged = new cv.MatVector();
-  merged.push_back(r);
-  merged.push_back(g);
-  merged.push_back(b);
-  merged.push_back(a);
-
+  merged.push_back(r); merged.push_back(g); merged.push_back(b); merged.push_back(a);
   cv.merge(merged, dst);
   dst.convertTo(dst, -1, 1.12, 5);
 
-  channels.delete();
-  merged.delete();
-  r.delete();
-  g.delete();
-  b.delete();
-  a.delete();
+  channels.delete(); merged.delete();
+  r.delete(); g.delete(); b.delete(); a.delete();
 
   return dst;
 }
 
 function applyVivid(src) {
   let dst = new cv.Mat();
-
   src.convertTo(dst, -1, 1.35, 8);
 
   let rgb = new cv.Mat();
   let hsv = new cv.Mat();
-
   cv.cvtColor(dst, rgb, cv.COLOR_RGBA2RGB);
   cv.cvtColor(rgb, hsv, cv.COLOR_RGB2HSV);
 
   let channels = new cv.MatVector();
   cv.split(hsv, channels);
-
   let h = channels.get(0);
   let s = channels.get(1);
   let v = channels.get(2);
-
   s.convertTo(s, -1, 1.45, 0);
 
   let merged = new cv.MatVector();
-  merged.push_back(h);
-  merged.push_back(s);
-  merged.push_back(v);
-
+  merged.push_back(h); merged.push_back(s); merged.push_back(v);
   cv.merge(merged, hsv);
-
   cv.cvtColor(hsv, rgb, cv.COLOR_HSV2RGB);
   cv.cvtColor(rgb, dst, cv.COLOR_RGB2RGBA);
 
-  rgb.delete();
-  hsv.delete();
-  channels.delete();
-  merged.delete();
-  h.delete();
-  s.delete();
-  v.delete();
+  rgb.delete(); hsv.delete(); channels.delete(); merged.delete();
+  h.delete(); s.delete(); v.delete();
 
   return dst;
 }
@@ -650,24 +641,26 @@ function applyVivid(src) {
 function applyBlackWhite(src) {
   let gray = new cv.Mat();
   let dst = new cv.Mat();
-
   cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
   gray.convertTo(gray, -1, 1.5, 5);
   cv.cvtColor(gray, dst, cv.COLOR_GRAY2RGBA);
-
   gray.delete();
 
   return dst;
 }
 
-clearResultCanvas();
+// ── Init ──────────────────────────────────────────────────────────────────────
+
+setStatus("AI 模型載入中...", "loading");
 
 preloadHandLandmarker()
   .then(() => {
     setLoadProgress("AI 模型已預載完成，可按「開啟相機」");
+    setStatus("AI 模型已就緒，請開啟相機", "ready");
   })
   .catch((error) => {
     console.warn("背景預載失敗，將在開啟相機時重試", error);
     landmarkerLoadPromise = null;
     setLoadProgress("AI 模型預載失敗，開啟相機時會再試一次");
+    setStatus("AI 模型預載失敗", "error");
   });
