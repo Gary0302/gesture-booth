@@ -19,6 +19,7 @@
 
     <p id="status">請按下「開啟相機」</p>
     <p id="gestureText">目前手勢：尚未偵測</p>
+    <p id="loadProgress" class="load-progress" hidden></p>
 
     <div class="buttons">
       <button id="startBtn">開啟相機</button>
@@ -30,14 +31,6 @@
     <canvas id="resultCanvas"></canvas>
   </main>
 
-  <script>
-    window.isOpenCvReady = false;
-    window.onOpenCvReady = function () {
-      window.isOpenCvReady = true;
-      console.log("OpenCV.js 已載入完成");
-    };
-  </script>
-  <script async src="https://docs.opencv.org/4.x/opencv.js" onload="onOpenCvReady();"></script>
   <script type="module" src="script.js"></script>
 </body>
 </html>

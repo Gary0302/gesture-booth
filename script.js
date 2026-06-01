@@ -11,11 +11,13 @@ const resetBtn = document.getElementById("resetBtn");
 const downloadBtn = document.getElementById("downloadBtn");
 const statusText = document.getElementById("status");
 const gestureText = document.getElementById("gestureText");
+const loadProgress = document.getElementById("loadProgress");
 const countdownText = document.getElementById("countdown");
 const resultCanvas = document.getElementById("resultCanvas");
 const resultCtx = resultCanvas.getContext("2d");
 
 let handLandmarker;
+let cameraStream = null;
 let isCameraOn = false;
 let isCapturing = false;
 let currentSlot = 1;
@@ -51,7 +53,20 @@ const filters = [
 
 const MODEL_PATH = new URL("./models/hand_landmarker.task", import.meta.url).href;
 const WASM_PATH = new URL("./wasm", import.meta.url).href;
-const LOAD_TIMEOUT_MS = 60000;
+const LOAD_TIMEOUT_MS = 90000;
+
+let landmarkerLoadPromise = null;
+let openCvLoadPromise = null;
+
+function setLoadProgress(text) {
+  if (!text) {
+    loadProgress.hidden = true;
+    loadProgress.textContent = "";
+    return;
+  }
+  loadProgress.hidden = false;
+  loadProgress.textContent = text;
+}
 
 function withTimeout(promise, ms, message) {
   return Promise.race([
@@ -62,16 +77,29 @@ function withTimeout(promise, ms, message) {
   ]);
 }
 
+function preloadHandLandmarker() {
+  if (!landmarkerLoadPromise) {
+    landmarkerLoadPromise = setupHandLandmarker({ silent: true });
+  }
+  return landmarkerLoadPromise;
+}
+
 startBtn.addEventListener("click", async () => {
   startBtn.disabled = true;
   try {
-    await Promise.all([setupCamera(), setupHandLandmarker()]);
+    await setupCamera();
+    setLoadProgress("相機已就緒，等待 AI 模型完成載入...");
+    await preloadHandLandmarker();
+    overlayCanvas.classList.add("active");
     gestureText.textContent = "目前手勢：搜尋手部中...";
+    setLoadProgress("");
+    statusText.textContent = "手勢辨識已就緒，請比 1 拍第 1 格（手掌面向鏡頭）";
     detectLoop();
   } catch (error) {
     console.error(error);
     statusText.textContent = `啟動失敗：${error.message || "請確認權限與網路"}`;
     gestureText.textContent = "目前手勢：尚未偵測";
+    setLoadProgress("");
     startBtn.disabled = false;
   }
 });
@@ -102,25 +130,45 @@ downloadBtn.addEventListener("click", () => {
 async function setupCamera() {
   if (isCameraOn) return;
 
-  const stream = await navigator.mediaDevices.getUserMedia({
+  statusText.textContent = "正在開啟相機...";
+
+  cameraStream = await navigator.mediaDevices.getUserMedia({
     video: {
       facingMode: "user",
-      width: { ideal: 640 },
-      height: { ideal: 480 }
+      width: { ideal: 640, max: 1280 },
+      height: { ideal: 480, max: 720 }
     },
     audio: false
   });
 
-  video.srcObject = stream;
+  video.srcObject = cameraStream;
+  video.muted = true;
+  video.playsInline = true;
+  video.setAttribute("playsinline", "");
+  video.setAttribute("webkit-playsinline", "");
 
-  await new Promise((resolve) => {
+  await new Promise((resolve, reject) => {
     video.onloadedmetadata = resolve;
+    video.onerror = () => reject(new Error("相機畫面載入失敗"));
   });
 
-  await video.play();
+  await ensureVideoPlaying();
   await waitForVideoDimensions();
   isCameraOn = true;
-  statusText.textContent = "相機已開啟，載入手勢辨識中...";
+  statusText.textContent = "相機已開啟";
+}
+
+async function ensureVideoPlaying() {
+  for (let i = 0; i < 5; i++) {
+    try {
+      await video.play();
+      if (!video.paused) return;
+    } catch (error) {
+      console.warn("video.play() 重試", error);
+    }
+    await wait(200);
+  }
+  throw new Error("無法播放相機畫面，請重新整理後再試");
 }
 
 async function waitForVideoDimensions() {
@@ -135,10 +183,13 @@ window.addEventListener("resize", () => {
   if (isCameraOn) ensureCanvasSize();
 });
 
-async function setupHandLandmarker() {
+async function setupHandLandmarker({ silent = false } = {}) {
   if (handLandmarker) return;
 
-  statusText.textContent = "載入手勢辨識引擎（WASM）...";
+  if (!silent) {
+    statusText.textContent = "載入手勢辨識引擎（WASM）...";
+  }
+  setLoadProgress("背景載入 WASM 引擎中...");
 
   const vision = await withTimeout(
     FilesetResolver.forVisionTasks(WASM_PATH),
@@ -146,7 +197,7 @@ async function setupHandLandmarker() {
     "手勢引擎載入逾時，請檢查網路後重試"
   );
 
-  statusText.textContent = "載入 AI 模型中...";
+  setLoadProgress("背景載入 AI 模型中（首次約 10–30 秒）...");
 
   const baseOptions = {
     modelAssetPath: MODEL_PATH
@@ -163,17 +214,18 @@ async function setupHandLandmarker() {
   try {
     handLandmarker = await withTimeout(
       HandLandmarker.createFromOptions(vision, {
-        baseOptions: { ...baseOptions, delegate: "CPU" },
+        baseOptions: { ...baseOptions, delegate: "GPU" },
         ...landmarkerOptions
       }),
       LOAD_TIMEOUT_MS,
       "AI 模型載入逾時，請檢查網路後重試"
     );
-  } catch (cpuError) {
-    console.warn("CPU delegate 失敗，改用 GPU", cpuError);
+  } catch (gpuError) {
+    console.warn("GPU delegate 失敗，改用 CPU", gpuError);
+    setLoadProgress("GPU 模式失敗，改用 CPU 載入模型...");
     handLandmarker = await withTimeout(
       HandLandmarker.createFromOptions(vision, {
-        baseOptions: { ...baseOptions, delegate: "GPU" },
+        baseOptions: { ...baseOptions, delegate: "CPU" },
         ...landmarkerOptions
       }),
       LOAD_TIMEOUT_MS,
@@ -181,7 +233,10 @@ async function setupHandLandmarker() {
     );
   }
 
-  statusText.textContent = "手勢辨識已就緒，請比 1 拍第 1 格（手掌面向鏡頭）";
+  setLoadProgress("");
+  if (!silent && isCameraOn) {
+    statusText.textContent = "手勢辨識已就緒，請比 1 拍第 1 格（手掌面向鏡頭）";
+  }
 }
 
 function ensureCanvasSize() {
@@ -201,6 +256,10 @@ function ensureCanvasSize() {
 
 function detectLoop() {
   if (!handLandmarker || !isCameraOn) return;
+
+  if (video.paused) {
+    video.play().catch(() => {});
+  }
 
   if (video.readyState < 2 || !ensureCanvasSize()) {
     requestAnimationFrame(detectLoop);
@@ -359,7 +418,7 @@ async function captureWithCountdown(slot) {
   isCapturing = false;
 }
 
-function capturePhoto(slot) {
+async function capturePhoto(slot) {
   const canvas = document.createElement("canvas");
   const ctx = canvas.getContext("2d");
 
@@ -372,7 +431,7 @@ function capturePhoto(slot) {
   ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
   ctx.restore();
 
-  applyOpenCvFilter(canvas, filters[slot - 1]);
+  await applyOpenCvFilter(canvas, filters[slot - 1]);
 
   return canvas;
 }
@@ -438,11 +497,41 @@ function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function loadOpenCv() {
+  if (openCvLoadPromise) return openCvLoadPromise;
+
+  openCvLoadPromise = new Promise((resolve, reject) => {
+    window.isOpenCvReady = false;
+    window.onOpenCvReady = function () {
+      window.isOpenCvReady = true;
+      resolve();
+    };
+
+    const script = document.createElement("script");
+    script.async = true;
+    script.src = "https://docs.opencv.org/4.x/opencv.js";
+    script.onload = () => {
+      if (typeof onOpenCvReady === "function") onOpenCvReady();
+    };
+    script.onerror = () => reject(new Error("OpenCV 載入失敗"));
+    document.body.appendChild(script);
+  });
+
+  return openCvLoadPromise;
+}
+
 function isOpenCvReady() {
   return window.isOpenCvReady === true && typeof cv !== "undefined";
 }
 
-function applyOpenCvFilter(canvas, filterName) {
+async function applyOpenCvFilter(canvas, filterName) {
+  try {
+    await loadOpenCv();
+  } catch (error) {
+    console.warn("OpenCV.js 尚未載入，先使用原圖", error);
+    return;
+  }
+
   if (!isOpenCvReady()) {
     console.warn("OpenCV.js 尚未載入，先使用原圖");
     return;
@@ -572,3 +661,13 @@ function applyBlackWhite(src) {
 }
 
 clearResultCanvas();
+
+preloadHandLandmarker()
+  .then(() => {
+    setLoadProgress("AI 模型已預載完成，可按「開啟相機」");
+  })
+  .catch((error) => {
+    console.warn("背景預載失敗，將在開啟相機時重試", error);
+    landmarkerLoadPromise = null;
+    setLoadProgress("AI 模型預載失敗，開啟相機時會再試一次");
+  });
