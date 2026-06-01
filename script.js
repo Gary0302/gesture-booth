@@ -255,17 +255,10 @@ async function setupHandLandmarker({ silent = false } = {}) {
   };
 
   // Each entry is [wasmPath, modelPath, delegate].
-  // iOS: CDN first (local self-hosted WASM triggers a WebGL context-attributes
-  // null-deref crash — "t.alpha" — in iOS Safari's WASM runtime; CDN avoids it),
-  // then local as fallback. CPU only — GPU delegate also crashes on iOS.
-  // Non-iOS: local GPU first, then local CPU, then CDN CPU.
+  // iOS: CPU only — GPU delegate also triggers the t.alpha crash.
+  // Non-iOS: local GPU first, then local CPU, then CDN as last resort.
   const candidates = IS_IOS
-    ? [
-        ["https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm",
-         "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
-         "CPU"],
-        [WASM_PATH, MODEL_PATH, "CPU"]
-      ]
+    ? [[WASM_PATH, MODEL_PATH, "CPU"]]
     : [
         [WASM_PATH, MODEL_PATH, "GPU"],
         [WASM_PATH, MODEL_PATH, "CPU"],
