@@ -186,16 +186,13 @@ function capturePhoto(slot) {
   ctx.translate(canvas.width, 0);
   ctx.scale(-1, 1);
 
-  // 套用每一格不同的基礎濾鏡
-  ctx.filter = filters[slot - 1];
-
+  // 先拍下原圖
   ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
   ctx.restore();
 
-  // 第 4 格加上凸透鏡效果
-  if (slot === 4) {
-    applyConvexEffect(canvas);
-  }
+  // 用 OpenCV.js 套濾鏡
+  applyOpenCvFilter(canvas, filters[slot - 1]);
 
   return canvas;
 }
@@ -308,3 +305,149 @@ function wait(ms) {
 }
 
 clearResultCanvas();
+function applyOpenCvFilter(canvas, filterName) {
+  if (!isOpenCvReady || typeof cv === "undefined") {
+    console.warn("OpenCV.js 尚未載入，先使用原圖");
+    return;
+  }
+
+  let src = cv.imread(canvas);
+  let dst = new cv.Mat();
+
+  if (filterName === "japaneseSoft") {
+    // 日系清透：亮、低對比、低飽和、柔一點
+    dst = applyJapaneseSoft(src);
+  } else if (filterName === "vintage") {
+    // 復古底片：偏暖、棕黃、對比略高
+    dst = applyVintage(src);
+  } else if (filterName === "vivid") {
+    // 高對比鮮豔：顏色更重
+    dst = applyVivid(src);
+  } else if (filterName === "blackWhite") {
+    // 黑白強對比
+    dst = applyBlackWhite(src);
+  } else {
+    dst = src.clone();
+  }
+
+  cv.imshow(canvas, dst);
+
+  src.delete();
+  dst.delete();
+}
+
+function applyJapaneseSoft(src) {
+  let dst = new cv.Mat();
+
+  // 亮度 + 對比
+  // alpha < 1 對比降低，beta > 0 變亮
+  src.convertTo(dst, -1, 0.85, 35);
+
+  // 柔焦一點點
+  let blurred = new cv.Mat();
+  cv.GaussianBlur(dst, blurred, new cv.Size(5, 5), 0);
+
+  // 混合原圖與模糊圖
+  cv.addWeighted(dst, 0.75, blurred, 0.25, 0, dst);
+
+  blurred.delete();
+
+  return dst;
+}
+
+function applyVintage(src) {
+  let dst = src.clone();
+
+  let channels = new cv.MatVector();
+  cv.split(dst, channels);
+
+  let r = channels.get(0);
+  let g = channels.get(1);
+  let b = channels.get(2);
+  let a = channels.get(3);
+
+  // 注意：OpenCV.js 讀 canvas 通常是 RGBA
+  // 增加紅色、降低藍色，做復古暖色
+  r.convertTo(r, -1, 1.15, 20);
+  g.convertTo(g, -1, 1.02, 8);
+  b.convertTo(b, -1, 0.75, 0);
+
+  let merged = new cv.MatVector();
+  merged.push_back(r);
+  merged.push_back(g);
+  merged.push_back(b);
+  merged.push_back(a);
+
+  cv.merge(merged, dst);
+
+  // 稍微增加對比
+  dst.convertTo(dst, -1, 1.12, 5);
+
+  channels.delete();
+  merged.delete();
+  r.delete();
+  g.delete();
+  b.delete();
+  a.delete();
+
+  return dst;
+}
+
+function applyVivid(src) {
+  let dst = new cv.Mat();
+
+  // 先提高對比與亮度
+  src.convertTo(dst, -1, 1.35, 8);
+
+  // 轉 HSV 增加飽和度
+  let rgb = new cv.Mat();
+  let hsv = new cv.Mat();
+
+  cv.cvtColor(dst, rgb, cv.COLOR_RGBA2RGB);
+  cv.cvtColor(rgb, hsv, cv.COLOR_RGB2HSV);
+
+  let channels = new cv.MatVector();
+  cv.split(hsv, channels);
+
+  let h = channels.get(0);
+  let s = channels.get(1);
+  let v = channels.get(2);
+
+  s.convertTo(s, -1, 1.45, 0);
+
+  let merged = new cv.MatVector();
+  merged.push_back(h);
+  merged.push_back(s);
+  merged.push_back(v);
+
+  cv.merge(merged, hsv);
+
+  cv.cvtColor(hsv, rgb, cv.COLOR_HSV2RGB);
+  cv.cvtColor(rgb, dst, cv.COLOR_RGB2RGBA);
+
+  rgb.delete();
+  hsv.delete();
+  channels.delete();
+  merged.delete();
+  h.delete();
+  s.delete();
+  v.delete();
+
+  return dst;
+}
+
+function applyBlackWhite(src) {
+  let gray = new cv.Mat();
+  let dst = new cv.Mat();
+
+  cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+
+  // 黑白強對比
+  gray.convertTo(gray, -1, 1.5, 5);
+
+  cv.cvtColor(gray, dst, cv.COLOR_GRAY2RGBA);
+
+  gray.delete();
+
+  return dst;
+}
