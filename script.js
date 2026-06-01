@@ -4,6 +4,8 @@ import {
 } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
 
 const video = document.getElementById("video");
+const overlayCanvas = document.getElementById("overlayCanvas");
+const overlayCtx = overlayCanvas.getContext("2d");
 const startBtn = document.getElementById("startBtn");
 const resetBtn = document.getElementById("resetBtn");
 const downloadBtn = document.getElementById("downloadBtn");
@@ -19,6 +21,23 @@ let isCapturing = false;
 let currentSlot = 1;
 let photos = [];
 let lastVideoTime = -1;
+let stableFrames = 0;
+
+const STABLE_FRAMES_REQUIRED = 10;
+const FINGER_PAIRS = [
+  [8, 6, 5],
+  [12, 10, 9],
+  [16, 14, 13],
+  [20, 18, 17]
+];
+const HAND_CONNECTIONS = [
+  [0, 1], [1, 2], [2, 3], [3, 4],
+  [0, 5], [5, 6], [6, 7], [7, 8],
+  [0, 9], [9, 10], [10, 11], [11, 12],
+  [0, 13], [13, 14], [14, 15], [15, 16],
+  [0, 17], [17, 18], [18, 19], [19, 20],
+  [5, 9], [9, 13], [13, 17]
+];
 
 const filters = [
   "japaneseSoft",
@@ -44,7 +63,9 @@ resetBtn.addEventListener("click", () => {
   currentSlot = 1;
   photos = [];
   isCapturing = false;
+  stableFrames = 0;
   clearResultCanvas();
+  clearHandOverlay();
   statusText.textContent = "已重新開始，請比 1 拍第 1 格";
   gestureText.textContent = "目前手勢：尚未偵測";
 });
@@ -80,9 +101,19 @@ async function setupCamera() {
   });
 
   await video.play();
+  resizeOverlayCanvas();
   isCameraOn = true;
   statusText.textContent = "相機已開啟，載入手勢辨識中...";
 }
+
+function resizeOverlayCanvas() {
+  overlayCanvas.width = video.videoWidth;
+  overlayCanvas.height = video.videoHeight;
+}
+
+window.addEventListener("resize", () => {
+  if (isCameraOn) resizeOverlayCanvas();
+});
 
 async function setupHandLandmarker() {
   if (handLandmarker) return;
@@ -96,22 +127,28 @@ async function setupHandLandmarker() {
       "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task"
   };
 
+  const landmarkerOptions = {
+    runningMode: "VIDEO",
+    numHands: 1,
+    minHandDetectionConfidence: 0.35,
+    minHandPresenceConfidence: 0.35,
+    minTrackingConfidence: 0.35
+  };
+
   try {
     handLandmarker = await HandLandmarker.createFromOptions(vision, {
       baseOptions: { ...baseOptions, delegate: "GPU" },
-      runningMode: "VIDEO",
-      numHands: 1
+      ...landmarkerOptions
     });
   } catch (gpuError) {
     console.warn("GPU delegate 失敗，改用 CPU", gpuError);
     handLandmarker = await HandLandmarker.createFromOptions(vision, {
       baseOptions: { ...baseOptions, delegate: "CPU" },
-      runningMode: "VIDEO",
-      numHands: 1
+      ...landmarkerOptions
     });
   }
 
-  statusText.textContent = "手勢辨識已就緒，請比 1 拍第 1 格";
+  statusText.textContent = "手勢辨識已就緒，請比 1 拍第 1 格（手掌面向鏡頭）";
 }
 
 function detectLoop() {
@@ -131,38 +168,93 @@ function detectLoop() {
       const landmarks = results.landmarks[0];
       const fingerCount = countFingers(landmarks);
 
-      gestureText.textContent = `目前手勢：${fingerCount} 根手指`;
+      drawHandOverlay(landmarks, fingerCount);
 
-      if (
-        fingerCount === currentSlot &&
-        !isCapturing &&
-        currentSlot <= 4
-      ) {
-        captureWithCountdown(currentSlot);
+      if (fingerCount === currentSlot && !isCapturing && currentSlot <= 4) {
+        stableFrames++;
+        gestureText.textContent = `目前手勢：${fingerCount} 根手指（保持 ${stableFrames}/${STABLE_FRAMES_REQUIRED}）`;
+
+        if (stableFrames >= STABLE_FRAMES_REQUIRED) {
+          stableFrames = 0;
+          captureWithCountdown(currentSlot);
+        }
+      } else {
+        stableFrames = 0;
+        gestureText.textContent = `目前手勢：${fingerCount} 根手指`;
       }
     } else {
-      gestureText.textContent = "目前手勢：未偵測到手";
+      stableFrames = 0;
+      clearHandOverlay();
+      gestureText.textContent = "目前手勢：未偵測到手（請將手掌面向鏡頭）";
     }
   }
 
   requestAnimationFrame(detectLoop);
 }
 
+function landmarkDistance(a, b) {
+  const dz = (a.z ?? 0) - (b.z ?? 0);
+  return Math.hypot(a.x - b.x, a.y - b.y, dz);
+}
+
 function countFingers(landmarks) {
+  const wrist = landmarks[0];
   let count = 0;
 
-  const fingerPairs = [
-    [8, 6],
-    [12, 10],
-    [16, 14],
-    [20, 18]
-  ];
+  for (const [tip, pip, mcp] of FINGER_PAIRS) {
+    const tipDist = landmarkDistance(landmarks[tip], wrist);
+    const pipDist = landmarkDistance(landmarks[pip], wrist);
+    const mcpDist = landmarkDistance(landmarks[mcp], wrist);
 
-  for (const [tip, pip] of fingerPairs) {
-    if (landmarks[tip].y < landmarks[pip].y) count++;
+    if (tipDist > pipDist && tipDist > mcpDist * 0.95) {
+      count++;
+    }
   }
 
   return count;
+}
+
+function toCanvasPoint(landmark) {
+  return {
+    x: landmark.x * overlayCanvas.width,
+    y: landmark.y * overlayCanvas.height
+  };
+}
+
+function drawHandOverlay(landmarks, fingerCount) {
+  overlayCtx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+
+  overlayCtx.strokeStyle = "rgba(0, 255, 120, 0.85)";
+  overlayCtx.lineWidth = 3;
+  overlayCtx.lineCap = "round";
+
+  for (const [start, end] of HAND_CONNECTIONS) {
+    const from = toCanvasPoint(landmarks[start]);
+    const to = toCanvasPoint(landmarks[end]);
+    overlayCtx.beginPath();
+    overlayCtx.moveTo(from.x, from.y);
+    overlayCtx.lineTo(to.x, to.y);
+    overlayCtx.stroke();
+  }
+
+  landmarks.forEach((landmark, index) => {
+    const point = toCanvasPoint(landmark);
+    overlayCtx.beginPath();
+    overlayCtx.fillStyle = index === 0 ? "#ffcc00" : "#00ff88";
+    overlayCtx.arc(point.x, point.y, index === 0 ? 7 : 5, 0, Math.PI * 2);
+    overlayCtx.fill();
+  });
+
+  overlayCtx.fillStyle = "rgba(0, 0, 0, 0.55)";
+  overlayCtx.fillRect(12, 12, 130, 36);
+  overlayCtx.fillStyle = "#fff";
+  overlayCtx.font = "bold 22px Arial";
+  overlayCtx.textAlign = "left";
+  overlayCtx.fillText(`${fingerCount} 根手指`, 24, 38);
+}
+
+function clearHandOverlay() {
+  overlayCtx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
 }
 
 async function captureWithCountdown(slot) {
