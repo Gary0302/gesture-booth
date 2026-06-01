@@ -1,7 +1,8 @@
-import {
-  HandLandmarker,
-  FilesetResolver
-} from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
+// Hand detection runs on TensorFlow.js with the WASM (CPU) backend — no WebGL.
+// This deliberately avoids MediaPipe Tasks Vision, whose internal WebGL context
+// is lost on arrival in iOS Safari ("null is not an object (evaluating 't.alpha')").
+// TFJS scripts are loaded dynamically (UMD globals) rather than imported, so the
+// WASM backend can resolve its own .wasm files from a known CDN path.
 
 const video = document.getElementById("video");
 const overlayCanvas = document.getElementById("overlayCanvas");
@@ -13,12 +14,11 @@ const gestureText = document.getElementById("gestureText");
 const loadProgress = document.getElementById("loadProgress");
 const countdownText = document.getElementById("countdown");
 
-let handLandmarker;
+let detector;
 let cameraStream = null;
 let isCameraOn = false;
 let isCapturing = false;
 let photos = [null, null, null, null];
-let detectTimestamp = 0;
 let stableFrames = 0;
 
 const detectCanvas = document.createElement("canvas");
@@ -42,18 +42,44 @@ const HAND_CONNECTIONS = [
 
 const filters = ["japaneseSoft", "vintage", "vivid", "blackWhite"];
 
-const MODEL_PATH = new URL("./models/hand_landmarker.task", import.meta.url).href;
-const WASM_PATH = new URL("./wasm", import.meta.url).href;
 const LOAD_TIMEOUT_MS = 90000;
 
-let landmarkerLoadPromise = null;
+// ── TensorFlow.js loading (UMD globals, no WebGL) ──────────────────────────────
+
+const TFJS_VERSION = "4.22.0";
+const HPD_VERSION = "2.0.1";
+const TFJS_WASM_BASE = `https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-wasm@${TFJS_VERSION}/dist/`;
+const TFJS_SCRIPTS = [
+  `https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-core@${TFJS_VERSION}/dist/tf-core.min.js`,
+  `https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-converter@${TFJS_VERSION}/dist/tf-converter.min.js`,
+  `https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-cpu@${TFJS_VERSION}/dist/tf-backend-cpu.min.js`,
+  `${TFJS_WASM_BASE}tf-backend-wasm.min.js`,
+  `https://cdn.jsdelivr.net/npm/@tensorflow-models/hand-pose-detection@${HPD_VERSION}/dist/hand-pose-detection.min.js`
+];
+
+let tfjsLoadPromise = null;
+let detectorLoadPromise = null;
 let openCvLoadPromise = null;
 
-// iOS Safari: GPU delegate crashes with "null is not an object (evaluating 't.alpha')"
-// because WebGL context attributes become null after context loss.
-// Also skip background preload on iOS — WebGL init without a user gesture is unreliable.
-const IS_IOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
-  (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+function loadScript(src) {
+  return new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+    script.src = src;
+    script.async = false; // preserve execution order
+    script.onload = resolve;
+    script.onerror = () => reject(new Error(`資源載入失敗：${src}`));
+    document.head.appendChild(script);
+  });
+}
+
+function loadTfjs() {
+  if (tfjsLoadPromise) return tfjsLoadPromise;
+  // Scripts must run in order: core → converter/backends → model package.
+  tfjsLoadPromise = (async () => {
+    for (const src of TFJS_SCRIPTS) await loadScript(src);
+  })();
+  return tfjsLoadPromise;
+}
 
 // ── Status badge ──────────────────────────────────────────────────────────────
 
@@ -94,7 +120,7 @@ startBtn.addEventListener("click", async () => {
   try {
     await setupCamera();
     setLoadProgress("相機已就緒，等待 AI 模型完成載入...");
-    await preloadHandLandmarker();
+    await preloadDetector();
     overlayCanvas.classList.add("active");
     gestureText.textContent = "目前手勢：搜尋手部中...";
     setLoadProgress("");
@@ -232,79 +258,38 @@ window.addEventListener("resize", () => {
   if (isCameraOn) ensureCanvasSize();
 });
 
-// ── Hand landmarker ───────────────────────────────────────────────────────────
+// ── Detector setup ────────────────────────────────────────────────────────────
 
-function preloadHandLandmarker() {
-  if (!landmarkerLoadPromise) {
-    landmarkerLoadPromise = setupHandLandmarker({ silent: true });
+function preloadDetector() {
+  if (!detectorLoadPromise) {
+    detectorLoadPromise = setupDetector();
   }
-  return landmarkerLoadPromise;
+  return detectorLoadPromise;
 }
 
-async function setupHandLandmarker({ silent = false } = {}) {
-  if (handLandmarker) return;
+async function setupDetector() {
+  if (detector) return;
 
-  if (!silent) setStatus("載入手勢辨識引擎...", "loading");
+  setLoadProgress("載入 AI 引擎中...");
+  await withTimeout(loadTfjs(), LOAD_TIMEOUT_MS, "AI 引擎載入逾時，請檢查網路後重試");
 
-  const landmarkerOptions = {
-    runningMode: "VIDEO",
-    numHands: 1,
-    minHandDetectionConfidence: 0.2,
-    minHandPresenceConfidence: 0.2,
-    minTrackingConfidence: 0.2
-  };
+  // WASM backend = pure CPU/WASM inference, no WebGL context to lose on iOS.
+  tf.wasm.setWasmPaths(TFJS_WASM_BASE);
+  await tf.setBackend("wasm");
+  await tf.ready();
 
-  // Each entry is [wasmPath, modelPath, delegate].
-  // iOS: CPU only — GPU delegate also triggers the t.alpha crash.
-  // Non-iOS: local GPU first, then local CPU, then CDN as last resort.
-  const candidates = IS_IOS
-    ? [[WASM_PATH, MODEL_PATH, "CPU"]]
-    : [
-        [WASM_PATH, MODEL_PATH, "GPU"],
-        [WASM_PATH, MODEL_PATH, "CPU"],
-        ["https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm",
-         "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
-         "CPU"]
-      ];
+  setLoadProgress("載入 AI 模型中（首次約 10–30 秒）...");
 
-  let lastError;
-  for (const [wasmPath, modelPath, delegate] of candidates) {
-    const isCdn = wasmPath.includes("jsdelivr");
-    setLoadProgress(`載入 AI 引擎${isCdn ? "（線上版）" : ""}中...`);
-
-    try {
-      const vision = await withTimeout(
-        FilesetResolver.forVisionTasks(wasmPath),
-        LOAD_TIMEOUT_MS,
-        "手勢引擎載入逾時，請檢查網路後重試"
-      );
-
-      setLoadProgress(`載入 AI 模型${isCdn ? "（線上版）" : ""}中（首次約 10–30 秒）...`);
-
-      handLandmarker = await withTimeout(
-        HandLandmarker.createFromOptions(vision, {
-          baseOptions: { modelAssetPath: modelPath, delegate },
-          ...landmarkerOptions
-        }),
-        LOAD_TIMEOUT_MS,
-        "AI 模型載入逾時，請檢查網路後重試"
-      );
-
-      lastError = null;
-      break;
-    } catch (err) {
-      lastError = err;
-      console.warn(`[${delegate} / ${isCdn ? "CDN" : "local"}] 失敗:`, err.message);
-      handLandmarker = undefined;
-    }
-  }
-
-  if (lastError) throw lastError;
+  detector = await withTimeout(
+    handPoseDetection.createDetector(
+      handPoseDetection.SupportedModels.MediaPipeHands,
+      { runtime: "tfjs", modelType: "lite", maxHands: 1 }
+    ),
+    LOAD_TIMEOUT_MS,
+    "AI 模型載入逾時，請檢查網路後重試"
+  );
 
   setLoadProgress("");
-  if (!silent && isCameraOn) {
-    setStatus("手勢辨識已就緒，比 1～4 根手指拍對應格子", "ready");
-  }
 }
 
 // ── Detection loop ────────────────────────────────────────────────────────────
@@ -322,36 +307,42 @@ function ensureCanvasSize() {
   return true;
 }
 
-function detectLoop() {
-  if (!handLandmarker || !isCameraOn) return;
+async function detectLoop() {
+  if (!isCameraOn) return;
+
+  // detector may briefly be undefined during (re)load — keep the loop alive.
+  if (!detector) {
+    requestAnimationFrame(detectLoop);
+    return;
+  }
 
   if (video.paused) video.play().catch(() => {});
 
-  // readyState check removed: iOS Safari getUserMedia streams can sit at
-  // readyState 1 even while actively delivering frames, causing the loop
-  // to never progress. ensureCanvasSize() guards against zero-dimension frames.
   if (!ensureCanvasSize()) {
     requestAnimationFrame(detectLoop);
     return;
   }
 
   detectCtx.drawImage(video, 0, 0, detectCanvas.width, detectCanvas.height);
-  detectTimestamp += 33;
 
-  let results;
+  let hands;
   try {
-    results = handLandmarker.detectForVideo(detectCanvas, detectTimestamp);
+    hands = await detector.estimateHands(detectCanvas, { flipHorizontal: false });
   } catch (error) {
     console.error("手勢偵測錯誤:", error);
+    setStatus(`手勢偵測失敗：${error.message || "請重新整理"}`, "error");
     requestAnimationFrame(detectLoop);
     return;
   }
 
-  if (results.landmarks && results.landmarks.length > 0) {
-    const landmarks = results.landmarks[0];
-    const fingerCount = countFingers(landmarks);
+  if (hands && hands.length > 0) {
+    // keypoints are pixel coords (for drawing); keypoints3D are metric (for
+    // counting). Both follow the 21-point MediaPipe hand topology.
+    const keypoints = hands[0].keypoints;
+    const countingPoints = hands[0].keypoints3D || keypoints;
+    const fingerCount = countFingers(countingPoints);
 
-    drawHandOverlay(landmarks, fingerCount);
+    drawHandOverlay(keypoints, fingerCount);
 
     const slotAvailable = fingerCount >= 1 && fingerCount <= 4 && photos[fingerCount - 1] === null;
 
@@ -404,12 +395,13 @@ function countFingers(landmarks) {
 
 // ── Overlay drawing ───────────────────────────────────────────────────────────
 
-// x is flipped here (not via CSS) so landmarks align with the mirrored video
-// and text drawn on the canvas stays readable (not backwards)
-function toCanvasPoint(landmark) {
+// keypoints are in pixel coords of detectCanvas (== overlayCanvas size). x is
+// flipped here (not via CSS) so landmarks align with the mirrored video and
+// text drawn on the canvas stays readable (not backwards).
+function toCanvasPoint(keypoint) {
   return {
-    x: (1 - landmark.x) * overlayCanvas.width,
-    y: landmark.y * overlayCanvas.height
+    x: overlayCanvas.width - keypoint.x,
+    y: keypoint.y
   };
 }
 
@@ -675,22 +667,17 @@ function applyBlackWhite(src) {
 
 // ── Init ──────────────────────────────────────────────────────────────────────
 
-if (IS_IOS) {
-  // On iOS, skip background preload — WebGL init without a user gesture is
-  // unreliable and causes the "t.alpha" context-loss crash. Init on button click instead.
-  setStatus("請開啟相機（iOS 裝置）", "default");
-} else {
-  setStatus("AI 模型載入中...", "loading");
+// WASM backend needs no user gesture and no WebGL, so preload on every platform.
+setStatus("AI 模型載入中...", "loading");
 
-  preloadHandLandmarker()
-    .then(() => {
-      setLoadProgress("AI 模型已預載完成，可按「開啟相機」");
-      setStatus("AI 模型已就緒，請開啟相機", "ready");
-    })
-    .catch((error) => {
-      console.warn("背景預載失敗，將在開啟相機時重試", error);
-      landmarkerLoadPromise = null;
-      setLoadProgress("AI 模型預載失敗，開啟相機時會再試一次");
-      setStatus("AI 模型預載失敗", "error");
-    });
-}
+preloadDetector()
+  .then(() => {
+    setLoadProgress("AI 模型已預載完成，可按「開啟相機」");
+    setStatus("AI 模型已就緒，請開啟相機", "ready");
+  })
+  .catch((error) => {
+    console.warn("背景預載失敗，將在開啟相機時重試", error);
+    detectorLoadPromise = null;
+    setLoadProgress("AI 模型預載失敗，開啟相機時會再試一次");
+    setStatus("AI 模型預載失敗", "error");
+  });

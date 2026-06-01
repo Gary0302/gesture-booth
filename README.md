@@ -12,7 +12,7 @@
 
 ## 技術
 
-- [MediaPipe Hand Landmarker](https://developers.google.com/mediapipe/solutions/vision/hand_landmarker) — 手勢辨識
+- [TensorFlow.js hand-pose-detection](https://github.com/tensorflow/tfjs-models/tree/master/hand-pose-detection)（MediaPipeHands 模型，`wasm` 後端）— 手勢辨識，不需 WebGL，相容 iOS Safari
 - [OpenCV.js](https://docs.opencv.org/4.x/d5/d10/tutorial_js_root.html) — 照片濾鏡
 - 純前端靜態網站，可部署至 Vercel
 
@@ -281,3 +281,89 @@ async function capturePhoto(slot) {
 **原始碼問題（`original/script.js`）：** 點「開啟相機」之後才呼叫 `setupHandLandmarker()`，首次下載 WASM + 模型需要 10–30 秒，期間畫面完全沒有回饋。
 
 **修正：** 頁面載入時就在背景開始 `preloadHandLandmarker()`，並用 `loadProgress` 元素顯示即時狀態（「背景載入中」→「已預載完成」）。點按鈕時模型通常已經好了，可以立刻使用。
+
+---
+
+### Bug 13：iOS Safari 上手動修補過的 WASM 造成 heap 崩潰，綠色骨架完全不顯示
+
+**問題：** 在 iOS Safari 上，相機畫面正常出現，但綠色手部骨架（甚至「掃描中…」的綠點）完全不顯示，也沒有任何錯誤訊息。
+
+**為什麼一開始查不到原因：** 原本的 `detectLoop` catch 區塊只是 `console.error` 後就 `requestAnimationFrame` 繼續，**把錯誤靜默吞掉**——於是迴圈一直在跑，卻每一幀都在丟錯、什麼都沒畫，外觀上就是「相機有畫面、但什麼 overlay 都沒有」。第一步是先把錯誤顯示在狀態列上，才看到 iOS 真正的錯誤：
+
+```
+手勢偵測失敗：Aborted(). Build with -sASSERTIONS for more info.
+手勢偵測失敗：Out of bounds memory access (evaluating '_malloc(size)')
+```
+
+**真正的根因：** 這是 WASM **heap 崩潰**，不是單純的 WebGL context 遺失。iOS Safari 會在串流過程中弄丟 WebGL context；而先前為了壓掉 `t.alpha` 崩潰，曾**手動修改自架的 Emscripten WASM glue**，在 `getContextAttributes()` 回傳 `null` 時「偽造一組合法的 WebGL 屬性」。這讓 MediaPipe **誤以為一個已死的 GL context 還活著**，後續就用垃圾狀態去計算 buffer 大小 → `_malloc` 存取越界 → `Abort()`。換句話說,那個修補把「乾淨的錯誤」變成了「heap 損毀」,而且每次自動重建都載入同一份壞掉的本機 WASM,重現同樣的崩潰。
+
+**為什麼最後要整個換掉引擎：** 先把那段有害的手改還原成 pristine 官方 WASM、iOS 改用官方 CDN build + CPU 之後,iOS 不再 heap 崩潰,但浮現出**最底層的真相**——
+
+```
+null is not an object (evaluating 't.alpha')
+```
+
+也就是 WebGL context **一建立就立刻遺失**。MediaPipe Tasks Vision **即使指定 `delegate: "CPU"`,內部仍一定會建立一個 WebGL context** 做影像轉換;在 iOS Safari 上這個 context 一出生就死亡,`getContextAttributes()` 回傳 `null`,然後在 WASM 內部崩潰。這是**MediaPipe WASM 內部的限制,從我們的程式碼無法修掉**(硬改就會變成上面的 heap 損毀)。
+
+**最終修正：整個改用 TensorFlow.js + WASM 後端(全平台)**
+
+唯一能徹底跳脫這整類問題的方法,是改用一個**完全不需要 WebGL**的推論引擎:
+
+1. **偵測引擎換成 [TensorFlow.js hand-pose-detection](https://github.com/tensorflow/tfjs-models/tree/master/hand-pose-detection)**,使用 `runtime: "tfjs"` 的 MediaPipeHands 模型。
+2. **後端強制設為 `wasm`**(`tf.setBackend("wasm")`)——純 CPU/WASM 推論,完全不建立 WebGL context,從根本上不會再有 `t.alpha`。
+3. **動態載入 TFJS UMD 腳本**(core → converter → cpu/wasm backend → 模型),不用 `import`,讓 wasm 後端能自行從固定 CDN 路徑(`tf.wasm.setWasmPaths(...)`)解析自己的 `.wasm` 檔。
+4. **landmark 格式轉換**:`estimateHands()` 回傳 `keypoints`(像素座標,用來畫骨架)與 `keypoints3D`(公尺座標,用來算手指數),都遵循同一套 21 點 MediaPipe 拓樸,`countFingers` / `HAND_CONNECTIONS` 幾乎原封不動。
+5. **不再靜默吞錯**:`detectLoop` 的 catch 會把真正的錯誤顯示在狀態列(就是靠這步才依序抓到 `_malloc` 與 `t.alpha`)。
+
+```js
+// 動態載入後設定後端
+tf.wasm.setWasmPaths("https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-wasm@4.22.0/dist/");
+await tf.setBackend("wasm");
+await tf.ready();
+
+detector = await handPoseDetection.createDetector(
+  handPoseDetection.SupportedModels.MediaPipeHands,
+  { runtime: "tfjs", modelType: "lite", maxHands: 1 }
+);
+
+// detectLoop 內(estimateHands 為非同步):
+const hands = await detector.estimateHands(detectCanvas, { flipHorizontal: false });
+if (hands.length > 0) {
+  const keypoints = hands[0].keypoints;                       // 像素 → 畫骨架
+  const counting  = hands[0].keypoints3D || keypoints;        // 公尺 → 算手指
+  drawHandOverlay(keypoints, countFingers(counting));
+}
+```
+
+**權衡：** 桌機原本用 MediaPipe GPU,換成 TFJS WASM 後推論會稍慢,但換來「一套程式碼、所有平台(含 iOS Safari)都能跑」的穩定性。自架的 `wasm/`、`models/` 已不再被使用。
+
+```js
+let detectErrorCount = 0;
+let recoveryAttempts = 0;
+let isRecoveringLandmarker = false;
+const MAX_RECOVERY_ATTEMPTS = 3;
+
+// detectLoop 內：
+try {
+  results = handLandmarker.detectForVideo(detectCanvas, detectTimestamp);
+  detectErrorCount = 0;
+} catch (error) {
+  detectErrorCount++;
+  if (!isRecoveringLandmarker && detectErrorCount >= 3) {
+    if (recoveryAttempts < MAX_RECOVERY_ATTEMPTS) recoverLandmarker();
+    else setStatus(`手勢偵測失敗：${error.message || "WebGL 內容遺失，請重新整理"}`, "error");
+  }
+  requestAnimationFrame(detectLoop);
+  return;
+}
+
+async function recoverLandmarker() {
+  isRecoveringLandmarker = true;
+  recoveryAttempts++;
+  try { handLandmarker?.close?.(); } catch (_) {}
+  handLandmarker = undefined;
+  landmarkerLoadPromise = null;
+  try { await preloadHandLandmarker(); detectErrorCount = 0; }
+  finally { isRecoveringLandmarker = false; }
+}
+```
