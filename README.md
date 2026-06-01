@@ -18,9 +18,9 @@
 
 ---
 
-## Debug 紀錄：從 `original/` 到現在可用版本的修正清單
+## Debug 紀錄：從 original (https://github.com/s113409-boop/gesture-booth) 到現在可用版本的修正清單
 
-以下每一條都對應 `original/` 目錄的實際 bug，若你自己在開發類似功能遇到問題，可以對照排查。
+以下每一條都對應 original 目錄的實際 bug，若你自己在開發類似功能遇到問題，可以對照排查。
 
 ---
 
@@ -219,7 +219,7 @@ try {
 
 ---
 
-### Bug 9：WASM 和模型從外部 CDN 載入，Vercel 部署後掛住
+### Bug 9 (無法執行的重點，環境因素)：WASM 和模型從外部 CDN 載入，Vercel 部署後掛住
 
 **原始碼問題（`original/script.js`）：**
 ```js
@@ -281,25 +281,3 @@ async function capturePhoto(slot) {
 **原始碼問題（`original/script.js`）：** 點「開啟相機」之後才呼叫 `setupHandLandmarker()`，首次下載 WASM + 模型需要 10–30 秒，期間畫面完全沒有回饋。
 
 **修正：** 頁面載入時就在背景開始 `preloadHandLandmarker()`，並用 `loadProgress` 元素顯示即時狀態（「背景載入中」→「已預載完成」）。點按鈕時模型通常已經好了，可以立刻使用。
-
----
-
-## 部署
-
-### Vercel
-
-```bash
-vercel --prod
-```
-
-在 Vercel Dashboard 連接 GitHub repo：`Gary0302/gesture-booth`
-
-### 本地測試
-
-因相機需要 HTTPS，本地請用：
-
-```bash
-npx serve .
-```
-
-或使用任何支援 HTTPS 的本地 server。
