@@ -20,8 +20,11 @@ let isCameraOn = false;
 let isCapturing = false;
 let currentSlot = 1;
 let photos = [];
-let lastVideoTime = -1;
+let detectTimestamp = 0;
 let stableFrames = 0;
+
+const detectCanvas = document.createElement("canvas");
+const detectCtx = detectCanvas.getContext("2d");
 
 const STABLE_FRAMES_REQUIRED = 10;
 const FINGER_PAIRS = [
@@ -88,8 +91,8 @@ async function setupCamera() {
   const stream = await navigator.mediaDevices.getUserMedia({
     video: {
       facingMode: "user",
-      width: { ideal: 1280 },
-      height: { ideal: 720 }
+      width: { ideal: 640 },
+      height: { ideal: 480 }
     },
     audio: false
   });
@@ -101,18 +104,12 @@ async function setupCamera() {
   });
 
   await video.play();
-  resizeOverlayCanvas();
   isCameraOn = true;
   statusText.textContent = "相機已開啟，載入手勢辨識中...";
 }
 
-function resizeOverlayCanvas() {
-  overlayCanvas.width = video.videoWidth;
-  overlayCanvas.height = video.videoHeight;
-}
-
 window.addEventListener("resize", () => {
-  if (isCameraOn) resizeOverlayCanvas();
+  if (isCameraOn) ensureCanvasSize();
 });
 
 async function setupHandLandmarker() {
@@ -130,20 +127,20 @@ async function setupHandLandmarker() {
   const landmarkerOptions = {
     runningMode: "VIDEO",
     numHands: 1,
-    minHandDetectionConfidence: 0.35,
-    minHandPresenceConfidence: 0.35,
-    minTrackingConfidence: 0.35
+    minHandDetectionConfidence: 0.2,
+    minHandPresenceConfidence: 0.2,
+    minTrackingConfidence: 0.2
   };
 
   try {
     handLandmarker = await HandLandmarker.createFromOptions(vision, {
-      baseOptions: { ...baseOptions, delegate: "GPU" },
+      baseOptions: { ...baseOptions, delegate: "CPU" },
       ...landmarkerOptions
     });
-  } catch (gpuError) {
-    console.warn("GPU delegate 失敗，改用 CPU", gpuError);
+  } catch (cpuError) {
+    console.warn("CPU delegate 失敗，改用 GPU", cpuError);
     handLandmarker = await HandLandmarker.createFromOptions(vision, {
-      baseOptions: { ...baseOptions, delegate: "CPU" },
+      baseOptions: { ...baseOptions, delegate: "GPU" },
       ...landmarkerOptions
     });
   }
@@ -151,42 +148,63 @@ async function setupHandLandmarker() {
   statusText.textContent = "手勢辨識已就緒，請比 1 拍第 1 格（手掌面向鏡頭）";
 }
 
+function ensureCanvasSize() {
+  if (video.videoWidth === 0 || video.videoHeight === 0) {
+    return false;
+  }
+
+  if (detectCanvas.width !== video.videoWidth) {
+    detectCanvas.width = video.videoWidth;
+    detectCanvas.height = video.videoHeight;
+    overlayCanvas.width = video.videoWidth;
+    overlayCanvas.height = video.videoHeight;
+  }
+
+  return true;
+}
+
 function detectLoop() {
   if (!handLandmarker || !isCameraOn) return;
 
-  if (video.readyState < 2) {
+  if (video.readyState < 2 || !ensureCanvasSize()) {
     requestAnimationFrame(detectLoop);
     return;
   }
 
-  const now = performance.now();
-  if (video.currentTime !== lastVideoTime) {
-    lastVideoTime = video.currentTime;
-    const results = handLandmarker.detectForVideo(video, now);
+  detectCtx.drawImage(video, 0, 0, detectCanvas.width, detectCanvas.height);
+  detectTimestamp += 33;
 
-    if (results.landmarks && results.landmarks.length > 0) {
-      const landmarks = results.landmarks[0];
-      const fingerCount = countFingers(landmarks);
+  let results;
+  try {
+    results = handLandmarker.detectForVideo(detectCanvas, detectTimestamp);
+  } catch (error) {
+    console.error("手勢偵測錯誤:", error);
+    requestAnimationFrame(detectLoop);
+    return;
+  }
 
-      drawHandOverlay(landmarks, fingerCount);
+  if (results.landmarks && results.landmarks.length > 0) {
+    const landmarks = results.landmarks[0];
+    const fingerCount = countFingers(landmarks);
 
-      if (fingerCount === currentSlot && !isCapturing && currentSlot <= 4) {
-        stableFrames++;
-        gestureText.textContent = `目前手勢：${fingerCount} 根手指（保持 ${stableFrames}/${STABLE_FRAMES_REQUIRED}）`;
+    drawHandOverlay(landmarks, fingerCount);
 
-        if (stableFrames >= STABLE_FRAMES_REQUIRED) {
-          stableFrames = 0;
-          captureWithCountdown(currentSlot);
-        }
-      } else {
+    if (fingerCount === currentSlot && !isCapturing && currentSlot <= 4) {
+      stableFrames++;
+      gestureText.textContent = `目前手勢：${fingerCount} 根手指（保持 ${stableFrames}/${STABLE_FRAMES_REQUIRED}）`;
+
+      if (stableFrames >= STABLE_FRAMES_REQUIRED) {
         stableFrames = 0;
-        gestureText.textContent = `目前手勢：${fingerCount} 根手指`;
+        captureWithCountdown(currentSlot);
       }
     } else {
       stableFrames = 0;
-      clearHandOverlay();
-      gestureText.textContent = "目前手勢：未偵測到手（請將手掌面向鏡頭）";
+      gestureText.textContent = `目前手勢：${fingerCount} 根手指`;
     }
+  } else {
+    stableFrames = 0;
+    drawScanningIndicator();
+    gestureText.textContent = "目前手勢：未偵測到手（請將手掌面向鏡頭）";
   }
 
   requestAnimationFrame(detectLoop);
@@ -255,6 +273,25 @@ function drawHandOverlay(landmarks, fingerCount) {
 
 function clearHandOverlay() {
   overlayCtx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+}
+
+function drawScanningIndicator() {
+  if (overlayCanvas.width === 0 || overlayCanvas.height === 0) return;
+
+  overlayCtx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+
+  overlayCtx.fillStyle = "rgba(0, 0, 0, 0.45)";
+  overlayCtx.fillRect(12, overlayCanvas.height - 44, 110, 32);
+
+  overlayCtx.fillStyle = "#00ff88";
+  overlayCtx.beginPath();
+  overlayCtx.arc(30, overlayCanvas.height - 28, 6, 0, Math.PI * 2);
+  overlayCtx.fill();
+
+  overlayCtx.fillStyle = "#fff";
+  overlayCtx.font = "14px Arial";
+  overlayCtx.textAlign = "left";
+  overlayCtx.fillText("掃描中...", 44, overlayCanvas.height - 23);
 }
 
 async function captureWithCountdown(slot) {
