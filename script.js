@@ -327,7 +327,10 @@ function detectLoop() {
 
   if (video.paused) video.play().catch(() => {});
 
-  if (video.readyState < 2 || !ensureCanvasSize()) {
+  // readyState check removed: iOS Safari getUserMedia streams can sit at
+  // readyState 1 even while actively delivering frames, causing the loop
+  // to never progress. ensureCanvasSize() guards against zero-dimension frames.
+  if (!ensureCanvasSize()) {
     requestAnimationFrame(detectLoop);
     return;
   }
