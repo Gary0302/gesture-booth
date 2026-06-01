@@ -300,8 +300,14 @@ function ensureCanvasSize() {
   if (detectCanvas.width !== video.videoWidth) {
     detectCanvas.width = video.videoWidth;
     detectCanvas.height = video.videoHeight;
-    overlayCanvas.width = video.videoWidth;
-    overlayCanvas.height = video.videoHeight;
+  }
+
+  const rect = video.getBoundingClientRect();
+  const dw = Math.round(rect.width);
+  const dh = Math.round(rect.height);
+  if (overlayCanvas.width !== dw || overlayCanvas.height !== dh) {
+    overlayCanvas.width = dw;
+    overlayCanvas.height = dh;
   }
 
   return true;
@@ -395,14 +401,22 @@ function countFingers(landmarks) {
 
 // ── Overlay drawing ───────────────────────────────────────────────────────────
 
-// keypoints are in pixel coords of detectCanvas (== overlayCanvas size). x is
-// flipped here (not via CSS) so landmarks align with the mirrored video and
-// text drawn on the canvas stays readable (not backwards).
+// Map a keypoint from native video pixel coords to overlay canvas coords,
+// applying the same object-fit:cover transform the <video> uses, then mirror.
 function toCanvasPoint(keypoint) {
-  return {
-    x: overlayCanvas.width - keypoint.x,
-    y: keypoint.y
-  };
+  const vw = video.videoWidth;
+  const vh = video.videoHeight;
+  const dw = overlayCanvas.width;
+  const dh = overlayCanvas.height;
+
+  const scale = Math.max(dw / vw, dh / vh);
+  const offsetX = (vw * scale - dw) / 2;
+  const offsetY = (vh * scale - dh) / 2;
+
+  const x = keypoint.x * scale - offsetX;
+  const y = keypoint.y * scale - offsetY;
+
+  return { x: dw - x, y };
 }
 
 function drawHandOverlay(landmarks, fingerCount) {
