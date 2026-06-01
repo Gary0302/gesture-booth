@@ -244,18 +244,8 @@ function preloadHandLandmarker() {
 async function setupHandLandmarker({ silent = false } = {}) {
   if (handLandmarker) return;
 
-  if (!silent) setStatus("載入手勢辨識引擎（WASM）...", "loading");
-  setLoadProgress("背景載入 WASM 引擎中...");
+  if (!silent) setStatus("載入手勢辨識引擎...", "loading");
 
-  const vision = await withTimeout(
-    FilesetResolver.forVisionTasks(WASM_PATH),
-    LOAD_TIMEOUT_MS,
-    "手勢引擎載入逾時，請檢查網路後重試"
-  );
-
-  setLoadProgress("背景載入 AI 模型中（首次約 10–30 秒）...");
-
-  const baseOptions = { modelAssetPath: MODEL_PATH };
   const landmarkerOptions = {
     runningMode: "VIDEO",
     numHands: 1,
@@ -264,35 +254,56 @@ async function setupHandLandmarker({ silent = false } = {}) {
     minTrackingConfidence: 0.2
   };
 
-  // iOS Safari: GPU delegate triggers "null is not an object (evaluating 't.alpha')"
-  // due to WebGL context loss. Use CPU directly and retry on failure.
-  const delegates = IS_IOS ? ["CPU"] : ["GPU", "CPU"];
+  // Each entry is [wasmPath, modelPath, delegate].
+  // iOS: CDN first (local self-hosted WASM triggers a WebGL context-attributes
+  // null-deref crash — "t.alpha" — in iOS Safari's WASM runtime; CDN avoids it),
+  // then local as fallback. CPU only — GPU delegate also crashes on iOS.
+  // Non-iOS: local GPU first, then local CPU, then CDN CPU.
+  const candidates = IS_IOS
+    ? [
+        ["https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm",
+         "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
+         "CPU"],
+        [WASM_PATH, MODEL_PATH, "CPU"]
+      ]
+    : [
+        [WASM_PATH, MODEL_PATH, "GPU"],
+        [WASM_PATH, MODEL_PATH, "CPU"],
+        ["https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm",
+         "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
+         "CPU"]
+      ];
 
   let lastError;
-  for (const delegate of delegates) {
-    if (delegate === "CPU" && delegates.length > 1) {
-      setLoadProgress("GPU 模式失敗，改用 CPU 載入模型...");
+  for (const [wasmPath, modelPath, delegate] of candidates) {
+    const isCdn = wasmPath.includes("jsdelivr");
+    setLoadProgress(`載入 AI 引擎${isCdn ? "（線上版）" : ""}中...`);
+
+    try {
+      const vision = await withTimeout(
+        FilesetResolver.forVisionTasks(wasmPath),
+        LOAD_TIMEOUT_MS,
+        "手勢引擎載入逾時，請檢查網路後重試"
+      );
+
+      setLoadProgress(`載入 AI 模型${isCdn ? "（線上版）" : ""}中（首次約 10–30 秒）...`);
+
+      handLandmarker = await withTimeout(
+        HandLandmarker.createFromOptions(vision, {
+          baseOptions: { modelAssetPath: modelPath, delegate },
+          ...landmarkerOptions
+        }),
+        LOAD_TIMEOUT_MS,
+        "AI 模型載入逾時，請檢查網路後重試"
+      );
+
+      lastError = null;
+      break;
+    } catch (err) {
+      lastError = err;
+      console.warn(`[${delegate} / ${isCdn ? "CDN" : "local"}] 失敗:`, err.message);
+      handLandmarker = undefined;
     }
-    // Retry up to 3 times per delegate — iOS WebGL context loss is often transient
-    for (let attempt = 1; attempt <= 3; attempt++) {
-      try {
-        handLandmarker = await withTimeout(
-          HandLandmarker.createFromOptions(vision, {
-            baseOptions: { ...baseOptions, delegate },
-            ...landmarkerOptions
-          }),
-          LOAD_TIMEOUT_MS,
-          "AI 模型載入逾時，請檢查網路後重試"
-        );
-        lastError = null;
-        break;
-      } catch (err) {
-        lastError = err;
-        console.warn(`${delegate} delegate 第 ${attempt} 次嘗試失敗:`, err.message);
-        if (attempt < 3) await wait(800 * attempt);
-      }
-    }
-    if (!lastError) break;
   }
 
   if (lastError) throw lastError;
