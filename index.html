@@ -4,34 +4,70 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>AI 手勢四格拍貼機</title>
+  <script src="https://cdn.tailwindcss.com"></script>
   <link rel="stylesheet" href="style.css" />
 </head>
-<body>
-  <main class="app">
-    <h1>AI 手勢四格拍貼機</h1>
-    <p class="subtitle">比 1 拍第 1 格，比 2 拍第 2 格，比 3 拍第 3 格，比 4 拍第 4 格</p>
+<body class="p-4 md:p-8">
+  <main class="max-w-3xl mx-auto flex flex-col gap-8">
 
-    <section class="camera-card">
-      <video id="video" autoplay playsinline muted></video>
-      <canvas id="overlayCanvas"></canvas>
-      <div id="countdown" class="countdown"></div>
+    <header class="text-center">
+      <h1 class="text-4xl font-black text-transparent bg-clip-text bg-gradient-to-r from-stone-600 to-amber-700 mb-2">
+        AI 手勢四格拍貼機
+      </h1>
+      <p class="text-stone-500 font-medium">
+        比 <span class="text-amber-700 font-bold">1, 2, 3, 4</span> 依序捕捉精彩瞬間！
+      </p>
+    </header>
+
+    <section class="glass-card p-4 rounded-3xl">
+      <div class="video-container mb-4">
+        <video id="video" autoplay playsinline muted></video>
+        <canvas id="overlayCanvas"></canvas>
+        <div id="countdown" class="countdown"></div>
+      </div>
+
+      <div class="flex flex-wrap items-center justify-between gap-4 px-2">
+        <div class="space-y-1">
+          <div id="status" class="status-badge">
+            <span id="statusDot"></span>
+            <span id="statusMsg">等待開啟相機...</span>
+          </div>
+          <p id="gestureText" class="text-sm font-bold text-stone-700 mt-1">目前手勢：尚未偵測</p>
+          <p id="loadProgress" class="load-progress" hidden></p>
+        </div>
+        <div class="flex gap-2">
+          <button id="startBtn"
+            class="bg-amber-700 hover:bg-amber-800 text-white font-bold py-2 px-6 rounded-xl shadow-lg">
+            開啟相機
+          </button>
+          <button id="resetBtn"
+            class="bg-white hover:bg-stone-50 text-stone-700 font-bold py-2 px-6 rounded-xl border border-stone-200">
+            重新拍攝
+          </button>
+        </div>
+      </div>
     </section>
 
-    <p id="status">請按下「開啟相機」</p>
-    <p id="gestureText">目前手勢：尚未偵測</p>
-    <p id="loadProgress" class="load-progress" hidden></p>
+    <p class="bg-white/50 p-4 rounded-2xl text-sm text-stone-500 italic text-center">
+      提示：請將手部置於鏡頭前方，確保光線充足。比出正確手指數後保持約 0.5 秒，將自動拍攝對應格子。
+    </p>
 
-    <div class="buttons">
-      <button id="startBtn">開啟相機</button>
-      <button id="resetBtn">重新拍攝</button>
-      <button id="downloadBtn">下載四格照</button>
+    <div class="flex flex-col items-center gap-4">
+      <h2 class="text-2xl font-bold text-stone-800">四格預覽</h2>
+      <div class="result-grid" id="photoStrip">
+        <div class="result-box" data-index="1"><span class="num-tag">1</span><span>待拍攝</span></div>
+        <div class="result-box" data-index="2"><span class="num-tag">2</span><span>待拍攝</span></div>
+        <div class="result-box" data-index="3"><span class="num-tag">3</span><span>待拍攝</span></div>
+        <div class="result-box" data-index="4"><span class="num-tag">4</span><span>待拍攝</span></div>
+      </div>
+      <button id="downloadBtn" disabled
+        class="bg-amber-700 hover:bg-amber-800 text-white font-bold py-3 px-8 rounded-2xl shadow-xl disabled:opacity-40 disabled:cursor-not-allowed w-full max-w-xs">
+        下載四格照
+      </button>
     </div>
 
-    <h2>四格照片</h2>
-    <canvas id="resultCanvas"></canvas>
   </main>
 
   <script type="module" src="script.js"></script>
 </body>
 </html>
-

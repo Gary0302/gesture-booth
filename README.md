@@ -5,9 +5,10 @@
 ## 使用方式
 
 1. 開啟網站（需 HTTPS 才能使用相機）
-2. 按下「開啟相機」並允許相機權限
-3. 依序比 1、2、3、4 根手指拍攝四格
-4. 完成後按「下載四格照」
+2. 等待頁面底部顯示「AI 模型已預載完成」
+3. 按下「開啟相機」並允許相機權限
+4. 依序比 1、2、3、4 根手指拍攝四格（保持手勢約 0.5 秒）
+5. 完成後按「下載四格照」
 
 ## 技術
 
@@ -17,80 +18,269 @@
 
 ---
 
-## 修復紀錄（Vercel 部署後手勢偵測失效）
+## Debug 紀錄：從 `original/` 到現在可用版本的修正清單
 
-### 問題
+以下每一條都對應 `original/` 目錄的實際 bug，若你自己在開發類似功能遇到問題，可以對照排查。
 
-部署到 Vercel 後，相機可以開啟，但手勢偵測無法正常運作。
+---
 
-### 原因與修正
+### Bug 1：`import` 語句不在 ES module 最上方
 
-#### 1. MediaPipe GPU delegate 在部分裝置失敗
+**原始碼問題（`original/script.js` 第 1–10 行）：**
+```js
+let isOpenCvReady = false;
+window.onOpenCvReady = function () { ... };
+import { HandLandmarker, FilesetResolver } from "...";
+```
+ES module 規範要求 `import` 必須在最頂層，寫在其他陳述式之後是非法的。部分瀏覽器會報 `SyntaxError: import declarations may only appear at top level`，模組整個不執行。
 
-**原因：** 原本固定使用 `delegate: "GPU"`。在 Safari、部分手機或沒有 WebGL 支援的環境，GPU 模式初始化會失敗，導致整個手勢辨識無法啟動。
+**修正：** 把 `import` 移到檔案第一行。
 
-**修正：** 先嘗試 GPU，失敗時自動 fallback 到 CPU。
+---
 
-```javascript
+### Bug 2：OpenCV 載入 race condition，濾鏡永遠套不上
+
+**原始碼問題（`original/index.html` 最後 + `original/script.js`）：**
+```html
+<!-- HTML 裡：async 代表一載入完就立刻執行 -->
+<script async src=".../opencv.js" onload="onOpenCvReady();"></script>
+<script type="module" src="script.js"></script>
+```
+```js
+// module 裡定義：
+window.onOpenCvReady = function () { isOpenCvReady = true; };
+```
+`type="module"` 的 script 是 deferred，一定在 HTML parsing 完成後才執行。但 `async` script 載入完就立刻執行，**可能在 module 執行前就觸發 `onOpenCvReady()`**，此時 `window.onOpenCvReady` 還是 `undefined`，呼叫失敗，`isOpenCvReady` 永遠是 `false`，拍出來的照片全是原圖沒有濾鏡。
+
+**修正：** 把 OpenCV 的 `<script>` 標籤從 HTML 移除，改為在 JS 裡動態注入並用 Promise 管理載入狀態：
+```js
+function loadOpenCv() {
+  if (openCvLoadPromise) return openCvLoadPromise;
+  openCvLoadPromise = new Promise((resolve, reject) => {
+    window.onOpenCvReady = function () {
+      window.isOpenCvReady = true;
+      resolve();
+    };
+    const script = document.createElement("script");
+    script.async = true;
+    script.src = "https://docs.opencv.org/4.x/opencv.js";
+    script.onload = () => { if (typeof onOpenCvReady === "function") onOpenCvReady(); };
+    script.onerror = () => reject(new Error("OpenCV 載入失敗"));
+    document.body.appendChild(script);
+  });
+  return openCvLoadPromise;
+}
+```
+
+---
+
+### Bug 3：手指計數只用 Y 軸，手一傾斜就全部誤判
+
+**原始碼問題（`original/script.js`）：**
+```js
+if (landmarks[8].y < landmarks[6].y) count++;  // 食指
+if (landmarks[12].y < landmarks[10].y) count++; // 中指
+// ...
+```
+MediaPipe landmarks 的 x/y 是 normalized（0.0 到 1.0），y 越小表示越靠近螢幕上方。這個邏輯「指尖 y < 關節 y = 手指伸直」只在手**完全垂直朝上**時正確。手一旋轉 45 度、側躺或朝鏡頭（selfie 角度），所有手指的 Y 軸關係都會顛倒，1 根手指可能被判成 4 根。
+
+**修正：** 改用「指尖到手腕的 3D 距離」算法——伸直的手指，指尖離手腕比指關節離手腕更遠：
+```js
+const FINGER_PAIRS = [
+  [8, 6, 5],   // [tip, pip, mcp] 食指
+  [12, 10, 9],
+  [16, 14, 13],
+  [20, 18, 17]
+];
+
+function countFingers(landmarks) {
+  const wrist = landmarks[0];
+  let count = 0;
+  for (const [tip, pip, mcp] of FINGER_PAIRS) {
+    const tipDist = landmarkDistance(landmarks[tip], wrist);
+    const pipDist = landmarkDistance(landmarks[pip], wrist);
+    const mcpDist = landmarkDistance(landmarks[mcp], wrist);
+    if (tipDist > pipDist && tipDist > mcpDist * 0.95) count++;
+  }
+  return count;
+}
+```
+
+---
+
+### Bug 4：第一幀符合就立刻觸發拍照
+
+**原始碼問題（`original/script.js`）：**
+```js
+if (fingerCount === currentSlot && !isCapturing && currentSlot <= 4) {
+  captureWithCountdown(currentSlot); // 第一幀符合就觸發
+}
+```
+手勢辨識有雜訊，某幀偶然判成 2 根手指就會觸發第 2 格拍照，即使使用者根本沒有比 2。
+
+**修正：** 加入穩定幀計數，連續 10 幀（約 0.3 秒）都是同一手勢才觸發：
+```js
+const STABLE_FRAMES_REQUIRED = 10;
+// ...
+if (fingerCount === currentSlot && !isCapturing && currentSlot <= 4) {
+  stableFrames++;
+  if (stableFrames >= STABLE_FRAMES_REQUIRED) {
+    stableFrames = 0;
+    captureWithCountdown(currentSlot);
+  }
+} else {
+  stableFrames = 0;
+}
+```
+
+---
+
+### Bug 5：`performance.now()` 作為 MediaPipe timestamp 造成重複或停止偵測
+
+**原始碼問題（`original/script.js`）：**
+```js
+const results = handLandmarker.detectForVideo(video, performance.now());
+```
+MediaPipe `detectForVideo` 要求傳入的 timestamp 必須**嚴格遞增**。`requestAnimationFrame` 的回呼如果被瀏覽器節流（tab 在背景、省電模式），多次呼叫的 `performance.now()` 可能相同或倒退，導致 MediaPipe 拋出錯誤或傳回上一幀的舊結果，偵測看起來「卡住」。
+
+**修正：** 使用手動遞增計數器，保證每次都不同：
+```js
+let detectTimestamp = 0;
+// 在 loop 裡：
+detectTimestamp += 33;
+results = handLandmarker.detectForVideo(detectCanvas, detectTimestamp);
+```
+
+---
+
+### Bug 6：偵測對象是 `<video>` 元素，維度未就緒時會當掉
+
+**原始碼問題（`original/script.js`）：**
+```js
+const results = handLandmarker.detectForVideo(video, performance.now());
+```
+直接把 `video` 元素傳給 MediaPipe，如果 `video.videoWidth === 0`（還沒拿到畫面），MediaPipe 會收到空白畫面或拋出例外，整個 `detectLoop` 停止。
+
+**修正：** 先把每幀畫到 `detectCanvas`，並在 loop 開頭檢查維度：
+```js
+const detectCanvas = document.createElement("canvas");
+// ...
+if (video.readyState < 2 || !ensureCanvasSize()) {
+  requestAnimationFrame(detectLoop);
+  return;
+}
+detectCtx.drawImage(video, 0, 0, detectCanvas.width, detectCanvas.height);
+results = handLandmarker.detectForVideo(detectCanvas, detectTimestamp);
+```
+
+---
+
+### Bug 7：沒有呼叫 `video.play()`，某些瀏覽器不會送出畫面
+
+**原始碼問題（`original/script.js`）：**
+```js
+video.srcObject = stream;
+await new Promise((resolve) => { video.onloadedmetadata = resolve; });
+// 就直接開始用了
+```
+iOS Safari 和某些 Android 瀏覽器即使有 `autoplay` 屬性，仍需要明確呼叫 `video.play()`，否則 `readyState` 停在 1（`HAVE_METADATA`），永遠沒有畫面。
+
+**修正：**
+```js
+await ensureVideoPlaying(); // 含 retry 的 video.play()
+await waitForVideoDimensions(); // 等 videoWidth > 0
+```
+
+---
+
+### Bug 8：GPU delegate 寫死，Safari 與部分手機直接失敗
+
+**原始碼問題（`original/script.js`）：**
+```js
+handLandmarker = await HandLandmarker.createFromOptions(vision, {
+  baseOptions: { modelAssetPath: "...", delegate: "GPU" },
+  ...
+});
+```
+沒有 WebGL 支援的環境（Safari 的某些版本、無 GPU 的 VM）初始化 GPU delegate 會拋出例外，整個手勢辨識無法啟動，不會 fallback。
+
+**修正：** try/catch GPU，失敗改用 CPU：
+```js
 try {
   handLandmarker = await HandLandmarker.createFromOptions(vision, {
-    baseOptions: { ...baseOptions, delegate: "GPU" },
-    runningMode: "VIDEO",
-    numHands: 1
+    baseOptions: { ...baseOptions, delegate: "GPU" }, ...
   });
-} catch (gpuError) {
+} catch {
   handLandmarker = await HandLandmarker.createFromOptions(vision, {
-    baseOptions: { ...baseOptions, delegate: "CPU" },
-    runningMode: "VIDEO",
-    numHands: 1
+    baseOptions: { ...baseOptions, delegate: "CPU" }, ...
   });
 }
 ```
 
-#### 2. OpenCV 載入時序競態（race condition）
+---
 
-**原因：** OpenCV.js 以 `async` 載入，完成後立刻呼叫 `onOpenCvReady()`，但 callback 原本定義在 ES module 裡，可能尚未執行，造成 `onOpenCvReady is not defined`，濾鏡無法套用。
+### Bug 9：WASM 和模型從外部 CDN 載入，Vercel 部署後掛住
 
-**修正：** 在 `index.html` 用 inline script 先定義 callback，確保 OpenCV 載入完成時一定找得到。
+**原始碼問題（`original/script.js`）：**
+```js
+const vision = await FilesetResolver.forVisionTasks(
+  "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm"
+);
+// model: "https://storage.googleapis.com/mediapipe-models/..."
+```
+本機開發正常，但 Vercel 部署後：
+- CDN 請求可能因為 CORS header 設定不同而被擋
+- 首次載入需要下載數 MB 的 WASM + 模型，無 timeout 保護，一旦網路慢就卡死沒有錯誤訊息
 
-```html
-<script>
-  window.isOpenCvReady = false;
-  window.onOpenCvReady = function () {
-    window.isOpenCvReady = true;
-  };
-</script>
-<script async src="https://docs.opencv.org/4.x/opencv.js" onload="onOpenCvReady();"></script>
+**修正：** 把 `wasm/` 目錄和 `models/hand_landmarker.task` 放進 repo 一起部署，用相對路徑載入，並加 90 秒 timeout：
+```js
+const WASM_PATH = new URL("./wasm", import.meta.url).href;
+const MODEL_PATH = new URL("./models/hand_landmarker.task", import.meta.url).href;
+
+const vision = await withTimeout(
+  FilesetResolver.forVisionTasks(WASM_PATH),
+  90000, "WASM 載入逾時"
+);
 ```
 
-#### 3. 手勢偵測每幀重複執行，時間戳不正確
+---
 
-**原因：** `detectForVideo()` 需要在「新影片幀」時呼叫，且 timestamp 需遞增。原本每個 animation frame 都偵測，可能導致結果不穩定。
+### Bug 10：`capturePhoto` 沒有 await 濾鏡，照片可能沒有套用
 
-**修正：** 用 `video.currentTime` 判斷是否為新幀，只有新幀才執行偵測。
+**原始碼問題（`original/script.js`）：**
+```js
+function capturePhoto(slot) {           // 同步函式
+  // ...
+  applyOpenCvFilter(canvas, filters[slot - 1]); // 非同步，不等它
+  return canvas;                        // 立刻回傳，可能濾鏡還沒跑
+}
+```
+`applyOpenCvFilter` 內部需要先 `await loadOpenCv()`，是非同步操作。原本直接呼叫沒有 `await`，照片在濾鏡套用前就已經被放進 grid，結果是原圖。
 
-```javascript
-if (video.currentTime !== lastVideoTime) {
-  lastVideoTime = video.currentTime;
-  const results = handLandmarker.detectForVideo(video, now);
+**修正：**
+```js
+async function capturePhoto(slot) {
+  // ...
+  await applyOpenCvFilter(canvas, filters[slot - 1]);
+  return canvas;
 }
 ```
 
-#### 4. 相機未明確播放
+---
 
-**原因：** 部分瀏覽器即使設了 `autoplay`，仍需要手動呼叫 `video.play()` 才會真正開始送 frame。
+### Bug 11：沒有 overlay canvas，骨架完全無法顯示
 
-**修正：** 在 `setupCamera()` 加入 `await video.play()`。
+**原始碼問題（`original/index.html`）：** HTML 裡沒有 `<canvas id="overlayCanvas">`，也沒有繪製手部骨架的任何邏輯。
 
-#### 5. ES module import 位置
+**修正：** 在 `<video>` 後面疊加一個 canvas，用相同的 `transform: scaleX(-1)` 保持鏡像對齊，並在 CSS 加 `position: absolute; inset: 0`，讓骨架與影像完全重疊。骨架只在手出現時顯示（`overlayCanvas.classList.add("active")`），避免載入前看到閃爍。
 
-**原因：** `import` 語句原本寫在其他程式碼之後，不符合標準 module 寫法。
+---
 
-**修正：** 將 `import` 移至 `script.js` 最上方。
+### Bug 12：模型只在按鈕按下後才開始載入，等待時間長且無進度顯示
 
-#### 6. 載入狀態提示
+**原始碼問題（`original/script.js`）：** 點「開啟相機」之後才呼叫 `setupHandLandmarker()`，首次下載 WASM + 模型需要 10–30 秒，期間畫面完全沒有回饋。
 
-**修正：** 新增「載入手勢辨識中...」、「手勢辨識已就緒」等狀態文字，方便確認流程是否正常。
+**修正：** 頁面載入時就在背景開始 `preloadHandLandmarker()`，並用 `loadProgress` 元素顯示即時狀態（「背景載入中」→「已預載完成」）。點按鈕時模型通常已經好了，可以立刻使用。
 
 ---
 
