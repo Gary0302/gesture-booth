@@ -49,6 +49,12 @@ const LOAD_TIMEOUT_MS = 90000;
 let landmarkerLoadPromise = null;
 let openCvLoadPromise = null;
 
+// iOS Safari: GPU delegate crashes with "null is not an object (evaluating 't.alpha')"
+// because WebGL context attributes become null after context loss.
+// Also skip background preload on iOS — WebGL init without a user gesture is unreliable.
+const IS_IOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+  (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+
 // ── Status badge ──────────────────────────────────────────────────────────────
 
 function setStatus(text, state = "default") {
@@ -258,27 +264,38 @@ async function setupHandLandmarker({ silent = false } = {}) {
     minTrackingConfidence: 0.2
   };
 
-  try {
-    handLandmarker = await withTimeout(
-      HandLandmarker.createFromOptions(vision, {
-        baseOptions: { ...baseOptions, delegate: "GPU" },
-        ...landmarkerOptions
-      }),
-      LOAD_TIMEOUT_MS,
-      "AI 模型載入逾時，請檢查網路後重試"
-    );
-  } catch (gpuError) {
-    console.warn("GPU delegate 失敗，改用 CPU", gpuError);
-    setLoadProgress("GPU 模式失敗，改用 CPU 載入模型...");
-    handLandmarker = await withTimeout(
-      HandLandmarker.createFromOptions(vision, {
-        baseOptions: { ...baseOptions, delegate: "CPU" },
-        ...landmarkerOptions
-      }),
-      LOAD_TIMEOUT_MS,
-      "AI 模型載入逾時，請檢查網路後重試"
-    );
+  // iOS Safari: GPU delegate triggers "null is not an object (evaluating 't.alpha')"
+  // due to WebGL context loss. Use CPU directly and retry on failure.
+  const delegates = IS_IOS ? ["CPU"] : ["GPU", "CPU"];
+
+  let lastError;
+  for (const delegate of delegates) {
+    if (delegate === "CPU" && delegates.length > 1) {
+      setLoadProgress("GPU 模式失敗，改用 CPU 載入模型...");
+    }
+    // Retry up to 3 times per delegate — iOS WebGL context loss is often transient
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        handLandmarker = await withTimeout(
+          HandLandmarker.createFromOptions(vision, {
+            baseOptions: { ...baseOptions, delegate },
+            ...landmarkerOptions
+          }),
+          LOAD_TIMEOUT_MS,
+          "AI 模型載入逾時，請檢查網路後重試"
+        );
+        lastError = null;
+        break;
+      } catch (err) {
+        lastError = err;
+        console.warn(`${delegate} delegate 第 ${attempt} 次嘗試失敗:`, err.message);
+        if (attempt < 3) await wait(800 * attempt);
+      }
+    }
+    if (!lastError) break;
   }
+
+  if (lastError) throw lastError;
 
   setLoadProgress("");
   if (!silent && isCameraOn) {
@@ -651,16 +668,22 @@ function applyBlackWhite(src) {
 
 // ── Init ──────────────────────────────────────────────────────────────────────
 
-setStatus("AI 模型載入中...", "loading");
+if (IS_IOS) {
+  // On iOS, skip background preload — WebGL init without a user gesture is
+  // unreliable and causes the "t.alpha" context-loss crash. Init on button click instead.
+  setStatus("請開啟相機（iOS 裝置）", "default");
+} else {
+  setStatus("AI 模型載入中...", "loading");
 
-preloadHandLandmarker()
-  .then(() => {
-    setLoadProgress("AI 模型已預載完成，可按「開啟相機」");
-    setStatus("AI 模型已就緒，請開啟相機", "ready");
-  })
-  .catch((error) => {
-    console.warn("背景預載失敗，將在開啟相機時重試", error);
-    landmarkerLoadPromise = null;
-    setLoadProgress("AI 模型預載失敗，開啟相機時會再試一次");
-    setStatus("AI 模型預載失敗", "error");
-  });
+  preloadHandLandmarker()
+    .then(() => {
+      setLoadProgress("AI 模型已預載完成，可按「開啟相機」");
+      setStatus("AI 模型已就緒，請開啟相機", "ready");
+    })
+    .catch((error) => {
+      console.warn("背景預載失敗，將在開啟相機時重試", error);
+      landmarkerLoadPromise = null;
+      setLoadProgress("AI 模型預載失敗，開啟相機時會再試一次");
+      setStatus("AI 模型預載失敗", "error");
+    });
+}
