@@ -1,3 +1,9 @@
+let isOpenCvReady = false;
+
+window.onOpenCvReady = function () {
+  isOpenCvReady = true;
+  console.log("OpenCV.js 已載入完成");
+};
 import {
   HandLandmarker,
   FilesetResolver
