@@ -21,10 +21,17 @@ let photos = [];
 
 // 四格原本的濾鏡
 const filters = [
-  "brightness(112%) contrast(92%) saturate(88%)",       // 第 1 格：日系清透
-  "sepia(45%) brightness(105%) contrast(105%)",         // 第 2 格：復古
-  "contrast(125%) saturate(130%) brightness(105%)",     // 第 3 格：高對比
-  "brightness(110%) contrast(100%) saturate(120%)"      // 第 4 格：凸透鏡前的基礎濾鏡
+  // 第 1 格：日系清透，偏亮、低對比、低飽和
+  "brightness(125%) contrast(80%) saturate(70%)",
+
+  // 第 2 格：復古底片，偏黃棕
+  "sepia(80%) brightness(110%) contrast(120%) saturate(80%)",
+
+  // 第 3 格：高對比鮮豔
+  "contrast(160%) saturate(180%) brightness(105%)",
+
+  // 第 4 格：黑白強對比
+  "grayscale(100%) contrast(150%) brightness(105%)"
 ];
 
 startBtn.addEventListener("click", async () => {
