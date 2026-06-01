@@ -1,9 +1,3 @@
-let isOpenCvReady = false;
-
-window.onOpenCvReady = function () {
-  isOpenCvReady = true;
-  console.log("OpenCV.js 已載入完成");
-};
 import {
   HandLandmarker,
   FilesetResolver
@@ -24,14 +18,17 @@ let isCameraOn = false;
 let isCapturing = false;
 let currentSlot = 1;
 let photos = [];
+let lastVideoTime = -1;
 
 const filters = [
-  "japaneseSoft",  // 第 1 格：日系清透
-  "vintage",       // 第 2 格：復古底片
-  "vivid",         // 第 3 格：高對比鮮豔
-  "blackWhite"     // 第 4 格：黑白強對比
+  "japaneseSoft",
+  "vintage",
+  "vivid",
+  "blackWhite"
 ];
+
 startBtn.addEventListener("click", async () => {
+  startBtn.disabled = true;
   try {
     await setupCamera();
     await setupHandLandmarker();
@@ -39,6 +36,7 @@ startBtn.addEventListener("click", async () => {
   } catch (error) {
     console.error(error);
     statusText.textContent = "相機或手勢辨識啟動失敗，請確認權限與網路";
+    startBtn.disabled = false;
   }
 });
 
@@ -68,7 +66,9 @@ async function setupCamera() {
 
   const stream = await navigator.mediaDevices.getUserMedia({
     video: {
-      facingMode: "user"
+      facingMode: "user",
+      width: { ideal: 1280 },
+      height: { ideal: 720 }
     },
     audio: false
   });
@@ -79,8 +79,9 @@ async function setupCamera() {
     video.onloadedmetadata = resolve;
   });
 
+  await video.play();
   isCameraOn = true;
-  statusText.textContent = "相機已開啟，請比 1 拍第 1 格";
+  statusText.textContent = "相機已開啟，載入手勢辨識中...";
 }
 
 async function setupHandLandmarker() {
@@ -90,37 +91,58 @@ async function setupHandLandmarker() {
     "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm"
   );
 
-  handLandmarker = await HandLandmarker.createFromOptions(vision, {
-    baseOptions: {
-      modelAssetPath:
-        "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
-      delegate: "GPU"
-    },
-    runningMode: "VIDEO",
-    numHands: 1
-  });
+  const baseOptions = {
+    modelAssetPath:
+      "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task"
+  };
+
+  try {
+    handLandmarker = await HandLandmarker.createFromOptions(vision, {
+      baseOptions: { ...baseOptions, delegate: "GPU" },
+      runningMode: "VIDEO",
+      numHands: 1
+    });
+  } catch (gpuError) {
+    console.warn("GPU delegate 失敗，改用 CPU", gpuError);
+    handLandmarker = await HandLandmarker.createFromOptions(vision, {
+      baseOptions: { ...baseOptions, delegate: "CPU" },
+      runningMode: "VIDEO",
+      numHands: 1
+    });
+  }
+
+  statusText.textContent = "手勢辨識已就緒，請比 1 拍第 1 格";
 }
 
 function detectLoop() {
   if (!handLandmarker || !isCameraOn) return;
 
-  const results = handLandmarker.detectForVideo(video, performance.now());
+  if (video.readyState < 2) {
+    requestAnimationFrame(detectLoop);
+    return;
+  }
 
-  if (results.landmarks && results.landmarks.length > 0) {
-    const landmarks = results.landmarks[0];
-    const fingerCount = countFingers(landmarks);
+  const now = performance.now();
+  if (video.currentTime !== lastVideoTime) {
+    lastVideoTime = video.currentTime;
+    const results = handLandmarker.detectForVideo(video, now);
 
-    gestureText.textContent = `目前手勢：${fingerCount} 根手指`;
+    if (results.landmarks && results.landmarks.length > 0) {
+      const landmarks = results.landmarks[0];
+      const fingerCount = countFingers(landmarks);
 
-    if (
-      fingerCount === currentSlot &&
-      !isCapturing &&
-      currentSlot <= 4
-    ) {
-      captureWithCountdown(currentSlot);
+      gestureText.textContent = `目前手勢：${fingerCount} 根手指`;
+
+      if (
+        fingerCount === currentSlot &&
+        !isCapturing &&
+        currentSlot <= 4
+      ) {
+        captureWithCountdown(currentSlot);
+      }
+    } else {
+      gestureText.textContent = "目前手勢：未偵測到手";
     }
-  } else {
-    gestureText.textContent = "目前手勢：未偵測到手";
   }
 
   requestAnimationFrame(detectLoop);
@@ -129,17 +151,16 @@ function detectLoop() {
 function countFingers(landmarks) {
   let count = 0;
 
-  // 食指：指尖 8，關節 6
-  if (landmarks[8].y < landmarks[6].y) count++;
+  const fingerPairs = [
+    [8, 6],
+    [12, 10],
+    [16, 14],
+    [20, 18]
+  ];
 
-  // 中指：指尖 12，關節 10
-  if (landmarks[12].y < landmarks[10].y) count++;
-
-  // 無名指：指尖 16，關節 14
-  if (landmarks[16].y < landmarks[14].y) count++;
-
-  // 小指：指尖 20，關節 18
-  if (landmarks[20].y < landmarks[18].y) count++;
+  for (const [tip, pip] of fingerPairs) {
+    if (landmarks[tip].y < landmarks[pip].y) count++;
+  }
 
   return count;
 }
@@ -181,66 +202,14 @@ function capturePhoto(slot) {
   canvas.height = video.videoHeight;
 
   ctx.save();
-
-  // 讓拍出來的照片不要左右相反
   ctx.translate(canvas.width, 0);
   ctx.scale(-1, 1);
-
-  // 先拍下原圖
   ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-
   ctx.restore();
 
-  // 用 OpenCV.js 套濾鏡
   applyOpenCvFilter(canvas, filters[slot - 1]);
 
   return canvas;
-}
-
-function applyConvexEffect(canvas) {
-  const ctx = canvas.getContext("2d");
-
-  const width = canvas.width;
-  const height = canvas.height;
-
-  const imageData = ctx.getImageData(0, 0, width, height);
-  const src = imageData.data;
-
-  const output = ctx.createImageData(width, height);
-  const dst = output.data;
-
-  const cx = width / 2;
-  const cy = height / 2;
-  const r = Math.min(width, height) / 3;
-
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      const dx = x - cx;
-      const dy = y - cy;
-      const d = Math.sqrt(dx * dx + dy * dy);
-
-      let sx = x;
-      let sy = y;
-
-      if (d <= r) {
-        sx = Math.floor((dx * d) / r + cx);
-        sy = Math.floor((dy * d) / r + cy);
-      }
-
-      sx = Math.max(0, Math.min(width - 1, sx));
-      sy = Math.max(0, Math.min(height - 1, sy));
-
-      const srcIndex = (sy * width + sx) * 4;
-      const dstIndex = (y * width + x) * 4;
-
-      dst[dstIndex] = src[srcIndex];
-      dst[dstIndex + 1] = src[srcIndex + 1];
-      dst[dstIndex + 2] = src[srcIndex + 2];
-      dst[dstIndex + 3] = src[srcIndex + 3];
-    }
-  }
-
-  ctx.putImageData(output, 0, 0);
 }
 
 function drawFourGrid() {
@@ -304,9 +273,12 @@ function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-clearResultCanvas();
+function isOpenCvReady() {
+  return window.isOpenCvReady === true && typeof cv !== "undefined";
+}
+
 function applyOpenCvFilter(canvas, filterName) {
-  if (!isOpenCvReady || typeof cv === "undefined") {
+  if (!isOpenCvReady()) {
     console.warn("OpenCV.js 尚未載入，先使用原圖");
     return;
   }
@@ -315,16 +287,12 @@ function applyOpenCvFilter(canvas, filterName) {
   let dst = new cv.Mat();
 
   if (filterName === "japaneseSoft") {
-    // 日系清透：亮、低對比、低飽和、柔一點
     dst = applyJapaneseSoft(src);
   } else if (filterName === "vintage") {
-    // 復古底片：偏暖、棕黃、對比略高
     dst = applyVintage(src);
   } else if (filterName === "vivid") {
-    // 高對比鮮豔：顏色更重
     dst = applyVivid(src);
   } else if (filterName === "blackWhite") {
-    // 黑白強對比
     dst = applyBlackWhite(src);
   } else {
     dst = src.clone();
@@ -339,15 +307,10 @@ function applyOpenCvFilter(canvas, filterName) {
 function applyJapaneseSoft(src) {
   let dst = new cv.Mat();
 
-  // 亮度 + 對比
-  // alpha < 1 對比降低，beta > 0 變亮
   src.convertTo(dst, -1, 0.85, 35);
 
-  // 柔焦一點點
   let blurred = new cv.Mat();
   cv.GaussianBlur(dst, blurred, new cv.Size(5, 5), 0);
-
-  // 混合原圖與模糊圖
   cv.addWeighted(dst, 0.75, blurred, 0.25, 0, dst);
 
   blurred.delete();
@@ -366,8 +329,6 @@ function applyVintage(src) {
   let b = channels.get(2);
   let a = channels.get(3);
 
-  // 注意：OpenCV.js 讀 canvas 通常是 RGBA
-  // 增加紅色、降低藍色，做復古暖色
   r.convertTo(r, -1, 1.15, 20);
   g.convertTo(g, -1, 1.02, 8);
   b.convertTo(b, -1, 0.75, 0);
@@ -379,8 +340,6 @@ function applyVintage(src) {
   merged.push_back(a);
 
   cv.merge(merged, dst);
-
-  // 稍微增加對比
   dst.convertTo(dst, -1, 1.12, 5);
 
   channels.delete();
@@ -396,10 +355,8 @@ function applyVintage(src) {
 function applyVivid(src) {
   let dst = new cv.Mat();
 
-  // 先提高對比與亮度
   src.convertTo(dst, -1, 1.35, 8);
 
-  // 轉 HSV 增加飽和度
   let rgb = new cv.Mat();
   let hsv = new cv.Mat();
 
@@ -441,13 +398,12 @@ function applyBlackWhite(src) {
   let dst = new cv.Mat();
 
   cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
-
-  // 黑白強對比
   gray.convertTo(gray, -1, 1.5, 5);
-
   cv.cvtColor(gray, dst, cv.COLOR_GRAY2RGBA);
 
   gray.delete();
 
   return dst;
 }
+
+clearResultCanvas();
